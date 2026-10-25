@@ -758,7 +758,7 @@ function capability<S extends z.ZodRawShape>(
  */
 async function openDocumentForHarness(
   name: string,
-): Promise<{ text: string; path: string | null } | null> {
+): Promise<{ text: string; path: string | null; source: string | null } | null> {
   const slash = name.indexOf("/");
   if (slash > 0) {
     const kind = name.slice(0, slash).toLowerCase();
@@ -766,20 +766,27 @@ async function openDocumentForHarness(
     const dir = (DIRS as Record<string, string | undefined>)[`${kind}s`];
     if (dir) {
       const parsed = await readMdByName(dir, rest);
-      if (parsed) {
-        return { text: parsed.body, path: join(dir, `${rest}.md`) };
-      }
+      if (parsed) return { text: parsed.body, path: join(dir, `${rest}.md`), source: null };
     }
     return null;
   }
 
   const skill = await readSkill(name);
-  if (skill) return { text: skill.body, path: join(DIRS.skills, name, "SKILL.md") };
+  if (skill) {
+    // A project's source dump sits beside its SKILL.md and is usually the thing
+    // worth working on, so the path travels with the document.
+    const source = join(DIRS.skills, name, "source.txt");
+    return {
+      text: skill.body,
+      path: join(DIRS.skills, name, "SKILL.md"),
+      source: (await fileExists(source)) ? source : null,
+    };
+  }
 
   // Fall back to the component directories, so a bare name still resolves.
   for (const dir of [DIRS.agents, DIRS.subagents, DIRS.plugins, DIRS.prompts]) {
     const parsed = await readMdByName(dir, name);
-    if (parsed) return { text: parsed.body, path: join(dir, `${name}.md`) };
+    if (parsed) return { text: parsed.body, path: join(dir, `${name}.md`), source: null };
   }
   return null;
 }

@@ -369,6 +369,50 @@ describe("the pre-existing capabilities still work from code", () => {
     expect(output).toMatch(/# kdmapper/);
   });
 
+  it("reaches a project's source dump without another call", async () => {
+    if (!requireArchive("reaches a project's source dump without another call")) return;
+    const output = await run(
+      "const d = await open('ags-kdmapper-1909');\n" +
+        "const size = await d.sourceSize();\n" +
+        "`${d.hasSource} ${size.lines} lines`",
+    );
+
+    // A project's source is usually the thing worth working on, so it travels
+    // with the document instead of needing a separate paginated call.
+    expect(output).toMatch(/^true \d+ lines$/);
+  });
+
+  it("searches a source dump and reports when it capped the answer", async () => {
+    if (!requireArchive("searches a source dump and reports when it capped the answer")) return;
+    const found = await run(
+      "const d = await open('ags-kdmapper-1909');\n(await d.grepSource(/iqvw64e/i, 2)).join(' | ')",
+    );
+    expect(found).toMatch(/iqvw64e/);
+
+    // A capped result must say so, or a partial match set reads as the whole
+    // truth.
+    const capped = await run(
+      "const d = await open('ags-kdmapper-1909');\n(await d.grepSource(/./, 2)).slice(-1)[0]",
+    );
+    expect(capped).toMatch(/more of \d+ matches/);
+  });
+
+  it("reports whether a source dump exists, and refuses plainly when none does", async () => {
+    if (!requireArchive("reports whether a source dump exists, and refuses plainly when none does"))
+      return;
+
+    // `hasSource` answers the question without an exception, so a model can
+    // branch on it before asking for content.
+    expect(await run("const s = await open('byovd'); s.hasSource")).toBe("false");
+    expect(await run("const s = await open('byovd'); JSON.stringify(await s.sourceSize())")).toBe(
+      "null",
+    );
+
+    // Asking anyway fails loudly with the reason, rather than returning nothing.
+    const refused = await run("const s = await open('byovd'); await s.grepSource(/x/)");
+    expect(refused).toMatch(/no source dump/);
+  });
+
   it("names what is available when a document does not exist", async () => {
     // The answer names what IS available, which only exists when the archive
     // does — an empty list would make the message unverifiable here.

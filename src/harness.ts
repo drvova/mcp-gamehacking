@@ -38,6 +38,7 @@ import vm from "node:vm";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import readline from "node:readline";
 import * as acorn from "acorn";
 
 /** A capability the harness can call: one of the server's own functions. */
@@ -64,6 +65,25 @@ export type Doc = {
   lines: string[];
   grep: (pattern: string | RegExp) => string[];
   headings: () => string[];
+  /** Whether this document has a source dump beside it. */
+  hasSource: boolean;
+  /** Size of the source dump, so a decision can be made before reading it. */
+  sourceSize: () => Promise<{ bytes: number; lines: number } | null>;
+  /**
+   * A range of the source dump, by line.
+   *
+   * Ranged and lazy on purpose: a source dump can be 100 MB, so reading one in
+   * full to look at ten lines would be the wrong shape for the question.
+   */
+  sourceLines: (from?: number, to?: number) => Promise<string[]>;
+  /**
+   * Search the source dump, streaming it line by line.
+   *
+   * Returns matches with their line numbers, and reports how many were found
+   * when more matched than the limit, so a capped answer is never mistaken for
+   * the whole truth.
+   */
+  grepSource: (pattern: string | RegExp, max?: number) => Promise<string[]>;
 };
 
 /** A session's bound working state. */
@@ -76,8 +96,11 @@ type Session = {
 export type HarnessOptions = {
   /** Directory holding persisted definitions. */
   dir: string;
-  /** Opens a document by name, for `open()`. */
-  open: (name: string) => Promise<{ text: string; path: string | null } | null>;
+  /** Opens a document by name, for `open()`. `source` is the source dump, if one
+   *  exists beside the document. */
+  open: (
+    name: string,
+  ) => Promise<{ text: string; path: string | null; source?: string | null } | null>;
   /** The names the project offers, for the manual. */
   offers: () => string[];
 };
@@ -483,29 +506,89 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
 
   // ---------------------------------------------------------------- documents
 
-  const makeDoc = (name: string, text: string, docPath: string | null): Doc => ({
-    name,
-    text,
-    path: docPath,
-    lines: text.split("\n"),
-    grep(pattern) {
-      const re = typeof pattern === "string" ? new RegExp(pattern, "i") : pattern;
-      return text.split("\n").filter((line) => re.test(line));
-    },
-    headings() {
-      return text
-        .split("\n")
-        .filter((line) => /^#{1,6}\s/.test(line))
-        .map((line) => line.trim());
-    },
-  });
+  const makeDoc = (
+    name: string,
+    text: string,
+    docPath: string | null,
+    sourcePath: string | null,
+  ): Doc => {
+    const asRegExp = (pattern: string | RegExp): RegExp =>
+      typeof pattern === "string" ? new RegExp(pattern, "i") : pattern;
+
+    /** Stream a file line by line, so a 100 MB dump never has to be held whole. */
+    const streamLines = async (file: string, visit: (line: string, index: number) => void) => {
+      const input = fs.createReadStream(file, { encoding: "utf8" });
+      const reader = readline.createInterface({ input, crlfDelay: Infinity });
+      let index = 0;
+      for await (const line of reader) {
+        visit(line, index);
+        index += 1;
+      }
+    };
+
+    return {
+      name,
+      text,
+      path: docPath,
+      lines: text.split("\n"),
+      hasSource: sourcePath !== null,
+      grep(pattern) {
+        const re = asRegExp(pattern);
+        return text.split("\n").filter((line) => re.test(line));
+      },
+      headings() {
+        return text
+          .split("\n")
+          .filter((line) => /^#{1,6}\s/.test(line))
+          .map((line) => line.trim());
+      },
+      async sourceSize() {
+        if (sourcePath === null) return null;
+        const info = await fs.promises.stat(sourcePath);
+        let lines = 0;
+        await streamLines(sourcePath, () => {
+          lines += 1;
+        });
+        return { bytes: info.size, lines };
+      },
+      async sourceLines(from = 0, to = 200) {
+        if (sourcePath === null) {
+          throw new Error(`${name} has no source dump; only its description is available.`);
+        }
+        const wanted: string[] = [];
+        await streamLines(sourcePath, (line, index) => {
+          if (index >= from && index < to) wanted.push(line);
+        });
+        return wanted;
+      },
+      async grepSource(pattern, max = 40) {
+        if (sourcePath === null) {
+          throw new Error(`${name} has no source dump; only its description is available.`);
+        }
+        const re = asRegExp(pattern);
+        const matches: string[] = [];
+        let total = 0;
+        await streamLines(sourcePath, (line, index) => {
+          if (!re.test(line)) return;
+          total += 1;
+          if (matches.length < max) matches.push(`${index + 1}: ${line.trim().slice(0, 200)}`);
+        });
+        // A capped answer says so, or the model reads a partial match set as the
+        // whole truth.
+        if (total > matches.length) {
+          matches.push(`... ${total - matches.length} more of ${total} matches (raise max).`);
+        }
+        return matches;
+      },
+    };
+  };
 
   const open = async (name: string): Promise<Doc> => {
     const found = await options.open(name);
     if (found === null) {
       throw new Error(`No document named ${JSON.stringify(name)}. ${offersHint()}`);
     }
-    const doc = makeDoc(name, found.text, found.path);
+    const doc = makeDoc(name, found.text, found.path, found.source ?? null);
     currentSession().opened.push(doc);
     return doc;
   };
@@ -648,6 +731,15 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
   /** Documentation the author wrote above a definition, by name. */
   const docs = new Map<string, string>();
 
+  /**
+   * The largest heap seen at the end of a call.
+   *
+   * Sampled before the collector can reclaim a large temporary, so a read that
+   * pulled a 100 MB file into memory is visible here even though the memory is
+   * released by the time anyone asks.
+   */
+  let peakHeap = 0;
+
   const kept = (): string[] =>
     fs
       .readdirSync(dir)
@@ -689,10 +781,18 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
       "  kb.skills.search({ ... })                     the same functions, grouped",
       '  const d = await open("some-skill")           open a skill (or "agent/name") to work on it here',
       "  doc / docs                                    the documents this session opened, bound each call",
+      "",
+      "A document gives you its description AND its source dump, without another call:",
+      "  d.text / d.lines / d.grep(/re/)               the description",
+      "  d.hasSource                                   whether a source dump exists",
+      "  await d.sourceSize()                          { bytes, lines } — check before reading",
+      "  await d.sourceLines(0, 200)                   a line range (lazy: a dump can be 100 MB)",
+      "  await d.grepSource(/0x140001000/)             search it, streamed, with line numbers",
       "  describe(search_skills)                       one function's arguments and doc",
       "  describe(doc)                                 an object's public members",
       "  S                                             the `strings` you passed, by name",
       "  kept()                                        what you have defined and kept",
+      "  stats()                                       heap, kept count, sessions — for big reads",
       '  forget("name")                                delete one',
       "  man()                                         this page",
       "",
@@ -800,6 +900,9 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
         value = await vm.runInContext(`(async () => {\n${body}\n})()`, context);
       } catch (error) {
         const failure = error as Error;
+        // Sampled here too: a call that failed after allocating still shows what
+        // it allocated.
+        peakHeap = Math.max(peakHeap, process.memoryUsage().heapUsed);
         return [
           ...captured,
           `${failure.name}: ${failure.message}`,
@@ -819,6 +922,8 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
       if (!forgotten.has(definition.name)) save(definition);
     }
     forgotten.clear();
+
+    peakHeap = Math.max(peakHeap, process.memoryUsage().heapUsed);
 
     const out: string[] = [...captured];
     const rendered = render(value);
@@ -872,6 +977,15 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
   seed("result", undefined);
   seed("doc", undefined);
   seed("docs", []);
+  // The harness's own footprint. Useful when working with a 100 MB source dump —
+  // and it is what makes "this read was lazy" an observable fact rather than a
+  // claim about the code.
+  seed("stats", () => ({
+    heapMB: Math.round((process.memoryUsage().heapUsed / 1048576) * 10) / 10,
+    peakMB: Math.round((peakHeap / 1048576) * 10) / 10,
+    kept: kept().length,
+    sessions: sessions.size,
+  }));
 
   // Capture, so the model's own output comes back with the value. Each returns
   // undefined, as the real console does: a trailing `console.log(...)` must not

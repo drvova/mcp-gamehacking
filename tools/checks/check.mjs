@@ -16,7 +16,15 @@
  * read or write a real home directory.
  */
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -460,6 +468,73 @@ const gates = {
     });
   },
 
+  async "source-in-process"() {
+    if (!archivePresent()) skip("source-in-process", "archive data absent");
+    await gate("source-in-process", async (dir) => {
+      const session = await openSession({ env: envFor(dir) });
+      try {
+        // A project's source is usually the thing worth working on, so it comes
+        // with the document rather than needing another paginated call.
+        const size = await run(
+          session,
+          "const d = await open('ags-kdmapper-1909'); JSON.stringify(await d.sourceSize())",
+        );
+        const parsed = JSON.parse(size);
+        assert(parsed && parsed.lines > 1000, `sourceSize reported nothing useful: ${size}`);
+
+        const range = await run(
+          session,
+          "const d = await open('ags-kdmapper-1909'); (await d.sourceLines(0, 3)).join('|')",
+        );
+        assert(
+          range.includes("Source Tree"),
+          `a line range returned nothing: ${range.slice(0, 80)}`,
+        );
+
+        const hits = await run(
+          session,
+          "const d = await open('ags-kdmapper-1909'); (await d.grepSource(/iqvw64e/i, 2)).join('|')",
+        );
+        assert(/iqvw64e/.test(hits), `grepSource found nothing: ${hits.slice(0, 120)}`);
+
+        // A capped answer says so, or a partial set reads as the whole truth.
+        const capped = await run(
+          session,
+          "const d = await open('ags-kdmapper-1909'); (await d.grepSource(/./, 2)).slice(-1)[0]",
+        );
+        assert(/more of \d+ matches/.test(capped), `a capped search was silent: ${capped}`);
+
+        // A skill with no dump says so plainly, and refuses rather than
+        // returning nothing.
+        const none = await run(session, "const s = await open('byovd'); s.hasSource");
+        assert(none === "false", `hasSource was wrong: ${none}`);
+        const refused = await run(
+          session,
+          "const s = await open('byovd'); await s.grepSource(/x/)",
+        );
+        assert(/no source dump/.test(refused), `a missing dump was not explained: ${refused}`);
+
+        // And the largest dump is read LAZILY. The harness reports its own
+        // footprint, so this measures the server rather than the checker — and a
+        // 100 MB file read eagerly would show up here immediately.
+        const before = JSON.parse(await run(session, "JSON.stringify(stats())")).peakMB;
+        const big = await run(
+          session,
+          "const b = await open('ags-game-engine-from-scratch'); (await b.sourceLines(0, 5)).join('|').slice(0, 60)",
+        );
+        assert(big.length > 0, "a ranged read of the largest dump returned nothing");
+        const after = JSON.parse(await run(session, "JSON.stringify(stats())")).peakMB;
+        assert(
+          after - before < 30,
+          `a ranged read of a 100 MB dump grew the harness by ${Math.round(after - before)} MB`,
+        );
+      } finally {
+        session.close();
+      }
+      pass("source-in-process");
+    });
+  },
+
   async "run-semantics"() {
     await gate("run-semantics", async (dir) => {
       const session = await openSession({ env: envFor(dir) });
@@ -703,6 +778,41 @@ missing.length === 0 ? "all reachable" : "missing: " + missing.join(", ")`,
     });
   },
 };
+
+/**
+ * Refuse to run against a stale build.
+ *
+ * Every gate drives `dist/index.js`, so a gate that runs after a FAILED build
+ * tests the previous artifact and can report a pass for code that no longer
+ * exists. That happened while writing this battery: a broken injection left the
+ * old dist in place and the gate passed, which is worse than no gate at all.
+ */
+function assertBuildIsFresh() {
+  const sources = readdirSync(join(ROOT, "src"))
+    .filter((name) => name.endsWith(".ts"))
+    .map((name) => join(ROOT, "src", name));
+  const built = join(ROOT, "dist", "index.js");
+
+  if (!existsSync(built)) {
+    console.error(
+      `FAIL: ${built} does not exist. Run \`npm run build\` before the gates — they drive the built server.`,
+    );
+    process.exit(1);
+  }
+
+  const builtAt = statSync(built).mtimeMs;
+  const stale = sources.filter((file) => statSync(file).mtimeMs > builtAt);
+  if (stale.length > 0) {
+    console.error(
+      `FAIL: the build is older than ${stale.length} source file(s):\n` +
+        `${stale.map((file) => `  ${file}`).join("\n")}\n` +
+        `Run \`npm run build\` — a gate against a stale artifact tests code that is not here.`,
+    );
+    process.exit(1);
+  }
+}
+
+assertBuildIsFresh();
 
 const requested = process.argv[2] ?? "all";
 

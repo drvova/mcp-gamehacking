@@ -12,7 +12,13 @@ npm run test:gates
 ```
 
 `GATES_REQUIRE_ARCHIVE=1` turns an absent data directory from a skip into a
-failure, so a green battery never implies coverage it did not have. Every gate
+failure, so a green battery never implies coverage it did not have.
+
+The battery **refuses to run against a stale build**: every gate drives
+`dist/index.js`, so a gate that runs after a failed build would test the previous
+artifact and could report a pass for code that is no longer there. That is not
+hypothetical — it happened while writing this battery, when a broken injection
+left the old `dist` in place and the gate passed. Run `npm run build` first. Every gate
 runs against the **built** server (`dist/index.js`) over stdio JSON-RPC, and
 every gate points the harness at a temp directory — the battery can never read
 or write a real home directory.
@@ -60,6 +66,12 @@ from inside that namespace rather than advertised as verbs.
 - [x] G14: A helper keeps the name it was defined with, reports the description its author wrote (and never a line of its own body), reports nothing when none was written, does not steal a comment that belongs to another declaration, keeps its description across a restart, and drops it on `forget`
   CHECK: node tools/checks/check.mjs helper-identity
   EXPECT: gate-passed:helper-identity
+
+## A project's source, in-process
+
+- [x] G15: A project's source dump comes with the document — `sourceSize` reports it, `sourceLines` reads a range lazily, `grepSource` searches it streamed with line numbers, a capped search says how many matched, a skill without a dump refuses plainly, and a ranged read of the **100 MB** dump does not pull it into memory
+  CHECK: node tools/checks/check.mjs source-in-process
+  EXPECT: gate-passed:source-in-process
 
 ## Persistence on disk
 
@@ -116,3 +128,6 @@ from inside that namespace rather than advertised as verbs.
 | G14 | attach any earlier comment to a declaration | `a comment was stolen by between` |
 | G14 | let `forget` keep the description | `a redefined name inherited the previous description` |
 | G14 | read descriptions only for functions | `a comment was not attached to its own declaration` |
+| G15 | read the whole file instead of streaming a range | `a ranged read of a 100 MB dump grew the harness by 206 MB` |
+| G15 | swallow the search cap | `a capped search was silent: 3: Source Tree:` |
+| G15 | report no source for a skill that has one | `sourceSize reported nothing useful: null` |
