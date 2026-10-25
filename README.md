@@ -195,7 +195,7 @@ The first match wins:
 
 1. `_meta.profile` on the request — an explicit profile id
 2. `_meta.model` on the request — matched against each profile's `models`
-3. the session override set by `surface` with `set`
+3. the session override — a composed surface from `pick`, or a named one from `set`
 4. `MCP_MODEL_PROFILE` or `MCP_MODEL` in the environment
 5. the client name reported at initialize, matched against `clientNames`
 6. `default` — the seed
@@ -212,7 +212,7 @@ everything-surface.
 | `claude`  | curated-first, with cross-check guidance                     |
 | `gpt`     | short deterministic sequences, compact results               |
 | `gemini`  | aggregation-first, per-claim attribution                     |
-| `compact` | 5 working tools, search weighted over reading                |
+| `compact` | 5 working tools + `surface`, search weighted over reading    |
 | `local`   | 4 working tools + `surface`, single-argument, no composition |
 
 ### The surface core
