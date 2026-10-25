@@ -1048,3 +1048,51 @@ describe("shaping the answer", () => {
     }
   });
 });
+
+describe("the listing declares what a tool does", () => {
+  it("says a shaped tool truncates, before it is ever called", async () => {
+    const session = await openSession();
+    try {
+      await session.request(
+        toolCall(1, "surface", {
+          pick: [
+            {
+              tool: "read_agent",
+              as: "who",
+              args: { name: "exploit-developer" },
+              output: { sections: ["Workflow"], head: 10 },
+            },
+          ],
+        }),
+      );
+
+      const who = ((await session.request(listTools(2)))?.result?.tools ?? []).find(
+        (tool) => tool.name === "who",
+      );
+
+      // A model that learns the rule from the result note has already read a
+      // partial answer as if it were whole, so the listing states it up front.
+      expect(who?.description).toContain("Workflow");
+      expect(who?.description).toContain("first 10 lines");
+      expect(who?.description).toMatch(/how much it kept/);
+    } finally {
+      session.close();
+    }
+  });
+
+  it("says nothing about shaping when there is none", async () => {
+    const session = await openSession();
+    try {
+      await session.request(
+        toolCall(1, "surface", { pick: [{ tool: "read_agent", as: "plain" }] }),
+      );
+
+      const plain = ((await session.request(listTools(2)))?.result?.tools ?? []).find(
+        (tool) => tool.name === "plain",
+      );
+      expect(plain?.description).not.toMatch(/how much it kept/);
+    } finally {
+      session.close();
+    }
+  });
+});

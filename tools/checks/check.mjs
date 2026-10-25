@@ -1340,6 +1340,29 @@ const CHECKS = {
       return textOf(responses.get(1));
     })();
 
+    // The LISTING has to say a tool truncates, not only the result. A model that
+    // learns the rule from the note has already read a partial answer as whole.
+    // Round-tripped, not batched: a batch is dispatched concurrently, so the
+    // listing can run before the compose it is meant to observe.
+    const declaredSession = await openSession();
+    try {
+      await declaredSession.request(
+        toolCall(1, "surface", {
+          pick: [{ tool: "read_agent", as: "who", output: { sections: ["Workflow"], head: 10 } }],
+        }),
+      );
+      const who = ((await declaredSession.request(listTools(2)))?.result?.tools ?? []).find(
+        (tool) => tool.name === "who",
+      );
+      assert(who, "the shaped tool was not listed");
+      assert(
+        /Workflow/.test(who.description ?? "") && /first 10 lines/.test(who.description ?? ""),
+        `the listing does not declare the shaping: ${(who.description ?? "").slice(0, 120)}`,
+      );
+    } finally {
+      declaredSession.close();
+    }
+
     // head: a prefix of the whole, and the note says how much was kept.
     const headed = await shape({ head: 5 });
     const answer = headed.split("\n\n[shaped:")[0] ?? "";

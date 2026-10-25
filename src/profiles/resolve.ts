@@ -490,13 +490,39 @@ function describeDerived(
   base: ShapeableTool,
   entry: ModelProfile["tools"]["derived"][number],
 ): string {
-  const lead = base.description ?? base.name;
-  const fixed = Object.entries(entry.args);
-  if (fixed.length === 0) return lead;
+  const lines = [base.description ?? base.name];
 
-  const shown = fixed.map(([key, value]) => `${key}=${JSON.stringify(value)}`).join(", ");
-  const pronoun = fixed.length === 1 ? "it" : "them";
-  return `${lead}\n\nAlready set for you: ${shown}. Omit ${pronoun} when you call.`;
+  const fixed = Object.entries(entry.args);
+  if (fixed.length > 0) {
+    const shown = fixed.map(([key, value]) => `${key}=${JSON.stringify(value)}`).join(", ");
+    const pronoun = fixed.length === 1 ? "it" : "them";
+    lines.push(`Already set for you: ${shown}. Omit ${pronoun} when you call.`);
+  }
+
+  // The listing has to say a tool truncates, not only the result. A model that
+  // discovers the rule by reading the note has already made the call and read a
+  // partial answer as if it were whole.
+  if (hasShaping(entry.output)) {
+    const rule = entry.output;
+    const parts: string[] = [];
+    if (rule.sections !== undefined && rule.sections.length > 0) {
+      parts.push(`only the ${rule.sections.map((name) => `"${name}"`).join(" and ")} sections`);
+    }
+    if (rule.filter !== undefined) parts.push(`only lines matching \`${rule.filter}\``);
+    if (rule.reject !== undefined) parts.push(`no lines matching \`${rule.reject}\``);
+    if (rule.head !== undefined) parts.push(`the first ${rule.head} lines`);
+    if (rule.tail !== undefined) parts.push(`the last ${rule.tail} lines`);
+    if (rule.maxChars !== undefined) parts.push(`at most ${rule.maxChars} characters`);
+
+    if (parts.length > 0) {
+      lines.push(
+        `Returns ${parts.join(", ")}. Every answer says how much it kept, so a ` +
+          "shaped result never reads as the whole one.",
+      );
+    }
+  }
+
+  return lines.join("\n\n");
 }
 
 /**
