@@ -415,9 +415,34 @@ mcp-gamehacking/
 |   +-- compare/      (10)     +-- debug/        (10)
 |   +-- generate/     (10)     +-- migrate/      (10)
 |   +-- optimize/     (10)     +-- setup/        (10)
++-- tools/checks/check.mjs      # Gate battery (see GATES.md)
++-- GATES.md                    # Acceptance ledger for the profile layer
 +-- package.json
 +-- tsconfig.json
 ```
+
+---
+
+## Verification
+
+```bash
+npm run build          # compile dist/
+npm run check          # lint, typecheck, format
+npm test               # test suite
+npm run test:gates     # gate battery (spawns the built server)
+npm run verify         # all of the above, in order
+```
+
+`GATES.md` is the acceptance ledger: each gate names the check that proves it,
+and `npm run test:gate -- <name>` runs one on its own.
+
+The gate battery spawns the built server and drives it over stdio JSON-RPC, so
+it exercises the shipped artifact rather than the sources.
+
+Three checks and five tests compare against real data in `skills/`. That archive
+is 19 GB, so CI checks the repository out without it; those cases detect the
+absence and **skip with a loud notice** rather than asserting against nothing.
+Set `GATES_REQUIRE_ARCHIVE=1` to make an absent archive a failure instead.
 
 ---
 
@@ -453,6 +478,7 @@ Sourced from [awesome-game-security](https://github.com/gmh5225/awesome-game-sec
 - **Language**: TypeScript
 - **Protocol**: MCP via `@modelcontextprotocol/sdk`
 - **Transport**: stdio
+- **CI**: GitHub Actions — build, lint, typecheck, format, tests, gates
 
 ---
 
