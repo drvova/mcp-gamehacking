@@ -8,6 +8,7 @@ import {
   SERVER,
   SKILLS_DIR,
   callServer,
+  requireArchive,
   textOf,
   toolCall,
 } from "./helpers/mcp.js";
@@ -82,6 +83,7 @@ describe("MCP server contract", () => {
 
 describe("skill index", () => {
   it("indexes every SKILL.md on disk", async () => {
+    if (!requireArchive("indexes every SKILL.md on disk")) return;
     const responses = await callServer([toolCall(1, "skill_stats")]);
     const total = Number(textOf(responses.get(1)).match(/\*\*Total:\*\*\s*(\d+)/)?.[1]);
 
@@ -97,6 +99,7 @@ describe("skill index", () => {
   it("returns a stable total under concurrent calls", async () => {
     // Regression guard: an unbounded concurrent build plus a missing
     // single-flight guard previously produced 0, 4159 and 4030 from one process.
+    if (!requireArchive("returns a stable total under concurrent calls")) return;
     const responses = await callServer([
       toolCall(1, "skill_stats"),
       toolCall(2, "skill_stats"),
@@ -114,6 +117,7 @@ describe("skill index", () => {
   it("parses metadata.type so type filters match", async () => {
     // Regression guard: the scalar matcher was anchored and every skill nests
     // `type` under `metadata:`, so this filter used to return zero rows.
+    if (!requireArchive("parses metadata.type so type filters match")) return;
     const responses = await callServer([
       toolCall(1, "list_skills", { type: "reference", limit: 1 }),
       toolCall(2, "skill_stats"),
@@ -128,6 +132,7 @@ describe("get_file_tree", () => {
   it("reads the drawn tree instead of markdown bullets", async () => {
     // Regression guard: the old fallback matched prose bullets, so a project
     // with a full tree reported a URL as its only "file".
+    if (!requireArchive("reads the drawn tree instead of markdown bullets")) return;
     const project = "ags-kdmapper-1909";
     const output = textOf(
       (await callServer([toolCall(1, "get_file_tree", { name: project, max_entries: 10 })])).get(1),

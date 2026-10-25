@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { existsSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { z } from "zod";
 
@@ -6,6 +7,38 @@ export const ROOT = resolve(import.meta.dirname, "../..");
 export const SERVER = resolve(ROOT, "dist", "index.js");
 export const SKILLS_DIR = resolve(ROOT, "skills");
 export const PROFILES_DIR = resolve(ROOT, "model-profiles");
+
+/**
+ * Whether the skill archive is present.
+ *
+ * It is 19 GB, so a CI checkout cannot materialise it and a sparse checkout
+ * deliberately omits it. Tests that compare against real archive data are
+ * meaningless without it, so they skip rather than assert against nothing.
+ */
+export function archivePresent(): boolean {
+  try {
+    return existsSync(SKILLS_DIR) && readdirSync(SKILLS_DIR).length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Skip guard for archive-dependent tests.
+ *
+ * Returns false and prints a loud, greppable notice when the archive is absent.
+ * A skip must never be mistakable for a pass, so the notice names the test and
+ * says what is missing.
+ */
+export function requireArchive(testName: string): boolean {
+  if (archivePresent()) return true;
+  console.log(
+    `[SKIP] ${testName} — the skill archive is absent at ${SKILLS_DIR}. ` +
+      "This test compares against real archive data and is not meaningful without it. " +
+      "Run on a full checkout to include it.",
+  );
+  return false;
+}
 
 /** A parsed JSON-RPC frame; `result` stays unvalidated until a use site parses it. */
 export const Frame = z.object({

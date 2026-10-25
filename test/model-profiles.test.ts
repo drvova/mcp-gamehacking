@@ -8,6 +8,7 @@ import {
   listTools,
   openSession,
   profileIdOf,
+  requireArchive,
   textOf,
   toolCall,
   toolNames,
@@ -85,6 +86,7 @@ describe("model profile surface", () => {
   it("keeps every tool reachable from the seed, since a profile only shapes presentation", async () => {
     // The seed carries a fraction of the catalogue. Every tool it omits must
     // still work by name, so a narrow surface never costs a capability.
+    if (!requireArchive("keeps every tool reachable from the seed")) return;
     const omitted = FULL_CATALOG.filter((name) => !SEED_SURFACE.includes(name));
     expect(omitted.length).toBeGreaterThan(0);
 

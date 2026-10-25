@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+    branches: ["main", "master"]
+  workflow_dispatch:
+
+jobs:
+  verify:
+    name: Build, check, test, gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      # The skill archive is 19 GB, so a full checkout does not fit on a runner.
+      # This fetches only what the build and the portable gates need; the
+      # archive-dependent checks detect its absence and skip with a loud notice
+      # rather than asserting against nothing.
+      - name: Checkout (excluding the skill archive)
+        uses: actions/checkout@v4
+        with:
+          filter: blob:none
+          sparse-checkout: |
+            /*
+            !/skills/
+          sparse-checkout-cone-mode: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Lint, typecheck and format
+        run: npm run check
+
+      - name: Test suite
+        run: npm test
+
+      - name: Gate battery
+        run: npm run test:gates
