@@ -1,0 +1,50 @@
+{
+  "id": "compact",
+  "label": "Compact context",
+  "description": "Five working tools plus the surface core, for a small context window, weighted toward search over reading.",
+  "match": {
+    "clientNames": [
+      "compact",
+      "small"
+    ],
+    "models": [
+      "small",
+      "mini",
+      "nano",
+      "flash",
+      "lite"
+    ]
+  },
+  "tools": {
+    "order": [
+      "search_skills",
+      "read_skill",
+      "skill_stats",
+      "list_skills",
+      "get_file_tree",
+      "surface"
+    ],
+    "include": [
+      "search_skills",
+      "read_skill",
+      "skill_stats",
+      "list_skills",
+      "get_file_tree",
+      "surface"
+    ],
+    "exclude": [],
+    "descriptions": {
+      "search_skills": "Narrow first. One specific query, then stop searching and read.",
+      "read_skill": "The distilled write-up. Cheapest way to a real answer.",
+      "list_skills": "Cheaper than a search when you already know part of the name.",
+      "get_file_tree": "Project shape without reading any source.",
+      "skill_stats": "Confirm the library is reachable and see its shape."
+    }
+  },
+  "guidance": "Your budget is small, so treat every read as expensive. Five working tools are carried here for that reason, plus the four that describe and change your own surface.\n\nNever call `read_source` without a specific question: a single archive can exceed 100,000 lines. Work in one direction — narrow with `search_skills`, read the write-up with `read_skill`, and stop once you can answer.\n\nIf the five working tools are not enough, `surface` with `list` shows everything that exists; recompose with `pick`, or take a ready-made one with `set`. Working around the gap costs more than recomposing does.",
+  "workflow": [
+    "search_skills once, with the most specific query you can form.",
+    "read_skill on the single best hit.",
+    "Answer; widen only if the answer is genuinely insufficient."
+  ]
+}

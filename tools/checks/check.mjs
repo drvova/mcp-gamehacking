@@ -2,10 +2,10 @@
 /**
  * Gate oracle for the mcp-gamehacking per-model profile layer.
  *
- * Run a single check by name, or `all` for the whole battery. Three checks read
- * the skill archive (19 GB), so they are declared in ARCHIVE_CHECKS and are
- * skipped with a loud notice when `skills/` is absent; set GATES_REQUIRE_ARCHIVE=1
- * to make that a failure instead.
+ * Run a single check by name, or `all` for the whole battery. A check whose data
+ * is absent declares itself skipped rather than passing quietly, so a green
+ * battery never implies coverage it did not have. Set GATES_REQUIRE_ARCHIVE=1
+ * to make an absent archive a failure instead of a skip.
  *
  * Every subcommand spawns the BUILT server (dist/index.js) and drives it over
  * stdio JSON-RPC, so the checks exercise the shipped artifact rather than the
@@ -13,7 +13,7 @@
  * success and exits non-zero with a reason otherwise.
  */
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const ROOT = resolve(import.meta.dirname, "../..");
@@ -21,41 +21,37 @@ const SERVER = join(ROOT, "dist", "index.js");
 const PROFILES_DIR = join(ROOT, "model-profiles");
 const SKILLS_DIR = join(ROOT, "skills");
 
-/** The seed surface an unrecognised caller starts on. */
-const SEED_SURFACE = ["surface"];
+/**
+ * Read the design from the data the server reads.
+ *
+ * The catalogue and the seed are NOT restated here: a copy would be a second
+ * source of truth that drifts from the manifest and the shipped surfaces. The
+ * manifest supplies the seed and the core; the server supplies the catalogue.
+ */
+function readManifest() {
+  return JSON.parse(readFileSync(join(ROOT, "profiles", "manifest.json"), "utf8"));
+}
 
-/** Every tool the server registers. */
-const FULL_CATALOG = [
-  "research_technique",
-  "analyze_project",
-  "get_agent_briefing",
-  "grep_sources",
-  "find_offset",
-  "compare_projects",
-  "find_similar",
-  "extract_offsets",
-  "search_by_game",
-  "search_by_engine",
-  "get_file_tree",
-  "find_function",
-  "export_offsets",
-  "skill_changelog",
-  "list_skills",
-  "read_skill",
-  "read_source",
-  "search_skills",
-  "skill_stats",
-  "list_agents",
-  "read_agent",
-  "list_subagents",
-  "read_subagent",
-  "list_plugins",
-  "read_plugin",
-  "list_prompts",
-  "read_prompt",
-  "surface",
-  "define_model_profile",
-];
+const MANIFEST = readManifest();
+
+/** Read a shipped surface's definition from the data directory. */
+function readSurface(id) {
+  return JSON.parse(readFileSync(join(ROOT, "profiles", `${id}.json`), "utf8"));
+}
+
+/**
+ * The tools an unrecognised caller starts with: whatever the manifest's seed
+ * surface declares, minus nothing. Read from data, never restated here.
+ */
+const SEED_SURFACE = readSurface(MANIFEST.seed).tools.include ?? [];
+
+/** Every tool the server registers, asked of the server itself. */
+async function fullCatalog() {
+  const responses = await callServer([listTools(1, { profile: "full" })]);
+  const names = toolNames(responses.get(1));
+  assert(names.length > 0, "the full surface presented no tools");
+  return names;
+}
 
 function fail(message) {
   console.error(`FAIL: ${message}`);
@@ -241,7 +237,10 @@ const CHECKS = {
     assert(existsSync(SERVER), `missing build artifact at ${SERVER}`);
     const responses = await callServer([]);
     const init = responses.get(0);
-    assert(init?.result?.serverInfo?.name === "mcp-gamehacking", "initialize returned no serverInfo");
+    assert(
+      init?.result?.serverInfo?.name === "mcp-gamehacking",
+      "initialize returned no serverInfo",
+    );
     const instructions = init.result.instructions;
     assert(typeof instructions === "string" && instructions.length > 100, "no usable instructions");
     assert(
@@ -280,7 +279,9 @@ const CHECKS = {
     const text = textOf(report.get(1));
     assert(!report.get(1)?.result?.isError, "the seed tool failed");
     assert(/## Not carried \(\d+\)/.test(text), "the seed report does not show what exists");
-    for (const name of FULL_CATALOG) {
+
+    const catalog = await fullCatalog();
+    for (const name of catalog) {
       assert(text.includes(`\`${name}\``), `the seed report omits ${name} from the catalogue`);
     }
     pass("seed-surface");
@@ -305,11 +306,10 @@ const CHECKS = {
       );
 
       // A typo must be reported, and the valid names must still take effect.
-      const typo = await session.request(toolCall(3, "surface", { pick: ["search_skills", "no_such_tool"] }));
-      assert(
-        textOf(typo).includes("no_such_tool"),
-        "an unknown tool name was accepted silently",
+      const typo = await session.request(
+        toolCall(3, "surface", { pick: ["search_skills", "no_such_tool"] }),
       );
+      assert(textOf(typo).includes("no_such_tool"), "an unknown tool name was accepted silently");
       const after = toolNames(await session.request(listTools(4)));
       assert(
         JSON.stringify(after) === JSON.stringify(["search_skills", "surface"]),
@@ -331,20 +331,18 @@ const CHECKS = {
   async "catalog-complete"() {
     // Nothing may be silently unreachable: the catalogue must list every
     // registered tool and agree with what tools/list actually serves.
-    const responses = await callServer([
-      toolCall(1, "surface", { list: "tools" }),
-      listTools(2),
-    ]);
+    const responses = await callServer([toolCall(1, "surface", { list: "tools" }), listTools(2)]);
 
     const catalog = textOf(responses.get(1));
     const listed = toolNames(responses.get(2));
 
-    for (const name of FULL_CATALOG) {
+    const expected = await fullCatalog();
+    for (const name of expected) {
       assert(catalog.includes(`\`${name}\``), `catalogue omits ${name}`);
     }
     assert(
-      catalog.includes(`(${FULL_CATALOG.length} registered)`),
-      `catalogue header does not report ${FULL_CATALOG.length} registered tools`,
+      catalog.includes(`(${expected.length} registered)`),
+      `catalogue header does not report ${expected.length} registered tools`,
     );
     assert(
       catalog.includes(`(${SEED_SURFACE.length})`),
@@ -352,13 +350,14 @@ const CHECKS = {
     );
 
     // Every tool this profile omits must still be callable, so the omission is
-    // presentation only. Exercise one that the seed definitely drops.
-    const omitted = FULL_CATALOG.filter((name) => !listed.includes(name));
+    // presentation only. The probes use tools whose data ships in every
+    // checkout, so this runs even where the skill archive is absent.
+    const omitted = (await fullCatalog()).filter((name) => !listed.includes(name));
     assert(omitted.length > 0, "the seed carries everything, so this check proves nothing");
 
     const probe = await callServer([
-      toolCall(1, "skill_stats"),
-      toolCall(2, "find_function", { function_name: "DriverEntry", max_results: 1 }),
+      toolCall(1, "list_agents"),
+      toolCall(2, "read_agent", { name: "exploit-developer" }),
     ]);
     for (const id of [1, 2]) {
       assert(!probe.get(id)?.result?.isError, `omitted tool ${id} was not callable`);
@@ -407,15 +406,89 @@ const CHECKS = {
     const gptSearch = gpt.get("search_skills") ?? "";
     const claudeSearch = claude.get("search_skills") ?? "";
     const fullSearch = full.get("search_skills") ?? "";
-    assert(
-      gptSearch !== fullSearch,
-      "gpt's search_skills wording did not apply",
-    );
-    assert(
-      claudeSearch === fullSearch,
-      "claude picked up another profile's search_skills wording",
-    );
+    assert(gptSearch !== fullSearch, "gpt's search_skills wording did not apply");
+    assert(claudeSearch === fullSearch, "claude picked up another profile's search_skills wording");
     pass("descriptions-apply");
+  },
+
+  async "data-driven"() {
+    // The design must live in data, not in the engine. Two things are proven
+    // here: no shipped surface id is written into the source, and a surface
+    // added as a file takes effect with no rebuild.
+    const shipped = readdirSync(join(ROOT, "profiles"))
+      .filter((name) => name.endsWith(".json") && name !== "manifest.json")
+      .map((name) => name.replace(/\.json$/, ""));
+    assert(shipped.length > 1, "expected several shipped surfaces");
+
+    // Strip comments so prose mentioning an id is not mistaken for logic.
+    const stripComments = (text) =>
+      text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+
+    const sources = readdirSync(join(ROOT, "src", "profiles"))
+      .filter((name) => name.endsWith(".ts"))
+      .concat(["../index.ts"]);
+
+    for (const id of shipped) {
+      for (const file of sources) {
+        const text = stripComments(readFileSync(join(ROOT, "src", "profiles", file), "utf8"));
+        assert(
+          !text.includes(`"${id}"`) && !text.includes(`'${id}'`),
+          `shipped surface "${id}" is hardcoded in src/profiles/${file}; it belongs in profiles/`,
+        );
+      }
+    }
+
+    // A surface dropped in as a file must be live immediately, with the built
+    // artifact untouched: that is what "the design is data" has to mean.
+    const probeId = "gate-probe-dropin";
+    const probePath = join(ROOT, "profiles", `${probeId}.json`);
+    const builtBefore = readFileSync(SERVER, "utf8");
+
+    try {
+      writeFileSync(
+        probePath,
+        JSON.stringify({
+          id: probeId,
+          label: "Drop-in probe",
+          description: "Written by the data-driven gate; must never survive a run.",
+          match: { clientNames: ["gate-dropin-client"], models: [] },
+          tools: {
+            include: ["list_agents", "read_agent"],
+            order: ["list_agents", "read_agent"],
+            exclude: [],
+            descriptions: { list_agents: "DROPIN PROBE WORDING" },
+          },
+          guidance:
+            "This surface exists only to prove that adding a file is enough to extend the system, with no rebuild and no source change.",
+          workflow: [],
+        }),
+        "utf8",
+      );
+
+      const byId = await callServer([listTools(1, { profile: probeId })]);
+      const names = toolNames(byId.get(1));
+      assert(
+        names.includes("list_agents") && names.includes(MANIFEST.surfaceCore[0]),
+        `a drop-in surface did not take effect: ${names.join(",")}`,
+      );
+
+      // Auto-selection from the file must work too, not just an explicit id.
+      const byClient = await callServer([listTools(1)], "gate-dropin-client");
+      assert(
+        toolNames(byClient.get(1)).includes("list_agents"),
+        "a drop-in surface's client match was ignored",
+      );
+
+      assert(
+        readFileSync(SERVER, "utf8") === builtBefore,
+        "the build artifact changed during this check, so it proves nothing",
+      );
+    } finally {
+      rmSync(probePath, { force: true });
+    }
+
+    assert(!existsSync(probePath), "cleanup failed to remove the drop-in probe");
+    pass("data-driven");
   },
 
   async "surface-escape"() {
@@ -423,7 +496,7 @@ const CHECKS = {
     // carry the tools that report and change the surface, or a model auto-detected
     // into it cannot discover the catalogue or leave. That would be a capability
     // loss caused by withheld knowledge, landing hardest on the smallest models.
-    const CORE = ["surface"];
+    const CORE = MANIFEST.surfaceCore;
     const ids = [
       "default",
       "full",
@@ -457,10 +530,7 @@ const CHECKS = {
         assert(names.length > 0, `profile ${id} presented nothing`);
 
         for (const tool of CORE) {
-          assert(
-            names.includes(tool),
-            `profile "${id}" cannot escape: it does not carry ${tool}`,
-          );
+          assert(names.includes(tool), `profile "${id}" cannot escape: it does not carry ${tool}`);
         }
       }
 
@@ -518,8 +588,8 @@ const CHECKS = {
 
     const compactNames = toolNames(overridden.get(1));
     assert(
-      compactNames.length > 0 && compactNames.length < FULL_CATALOG.length,
-      `compact profile listed ${compactNames.length} tools, expected fewer than the ${FULL_CATALOG.length}-tool catalogue`,
+      compactNames.length > 0 && compactNames.length < (await fullCatalog()).length,
+      `compact profile listed ${compactNames.length} tools, expected fewer than the full catalogue`,
     );
     assert(
       JSON.stringify(compactNames) ===
@@ -548,24 +618,23 @@ const CHECKS = {
   },
 
   async "filter-advisory"() {
+    // A profile shapes presentation only: a tool it does not list must still
+    // work when called by name. Probed with data that ships in every checkout.
     const responses = await callServer([
       listTools(1, { profile: "compact" }),
-      toolCall(2, "grep_sources", { pattern: "DriverEntry", max_files: 1, max_matches_per_file: 1 }, {
-        profile: "compact",
-      }),
-      toolCall(3, "read_source", { name: "ags-kdmapper-1909", limit: 3 }, { profile: "compact" }),
+      toolCall(2, "list_agents", {}, { profile: "compact" }),
+      toolCall(3, "read_agent", { name: "exploit-developer" }, { profile: "compact" }),
     ]);
 
     const listed = toolNames(responses.get(1));
-    assert(!listed.includes("grep_sources"), "grep_sources should be omitted from the compact listing");
-    assert(!listed.includes("read_source"), "read_source should be omitted from the compact listing");
-
-    for (const id of [2, 3]) {
-      const response = responses.get(id);
-      assert(!response?.error, `call ${id} returned a protocol error: ${JSON.stringify(response?.error)}`);
-      assert(!response?.result?.isError, `call ${id} was refused: ${textOf(response).slice(0, 200)}`);
-      assert(textOf(response).length > 0, `call ${id} returned empty output`);
+    for (const name of ["list_agents", "read_agent"]) {
+      assert(!listed.includes(name), `${name} should be omitted from the compact listing`);
     }
+
+    assert(!responses.get(2)?.result?.isError, "an omitted tool was not callable");
+    assert(/Available agents \(\d+\)/.test(textOf(responses.get(2))), "no agent listing returned");
+    assert(!responses.get(3)?.result?.isError, "an omitted tool was not callable");
+    assert(textOf(responses.get(3)).includes("# Agent: exploit-developer"), "agent body missing");
     pass("filter-advisory");
   },
 
@@ -591,7 +660,10 @@ const CHECKS = {
         }),
       ]);
       const createText = textOf(created.get(1));
-      assert(!created.get(1)?.result?.isError, `define_model_profile failed: ${createText.slice(0, 200)}`);
+      assert(
+        !created.get(1)?.result?.isError,
+        `define_model_profile failed: ${createText.slice(0, 200)}`,
+      );
       assert(existsSync(path), `profile file was not written to ${path}`);
 
       const onDisk = JSON.parse(readFileSync(path, "utf8"));
@@ -620,8 +692,7 @@ const CHECKS = {
         const names = toolNames(listing);
         // The author's order first, then the surface core the server guarantees.
         assert(
-          JSON.stringify(names) ===
-            JSON.stringify(["skill_stats", "search_skills", "surface"]),
+          JSON.stringify(names) === JSON.stringify(["skill_stats", "search_skills", "surface"]),
           `session override did not reshape the listing: ${names.join(",")}`,
         );
 
@@ -665,7 +736,8 @@ const CHECKS = {
           id: candidate,
           label: "Hostile",
           description: "Should never be written",
-          guidance: "A hostile identifier must be refused outright and must never reach the filesystem.",
+          guidance:
+            "A hostile identifier must be refused outright and must never reach the filesystem.",
         }),
       ),
     );
@@ -677,11 +749,21 @@ const CHECKS = {
     }
 
     // Nothing may have appeared anywhere outside the profiles directory.
-    for (const stray of ["escape.json", "hidden.json", "UPPER.json", "a.json", "con.json", "nul.json"]) {
+    for (const stray of [
+      "escape.json",
+      "hidden.json",
+      "UPPER.json",
+      "a.json",
+      "con.json",
+      "nul.json",
+    ]) {
       assert(!existsSync(join(ROOT, stray)), `hostile write escaped to ${stray}`);
     }
     const after = existsSync(PROFILES_DIR) ? readdirSync(PROFILES_DIR).length : 0;
-    assert(after === before, `profile directory changed during hostile attempts (${before} -> ${after})`);
+    assert(
+      after === before,
+      `profile directory changed during hostile attempts (${before} -> ${after})`,
+    );
 
     // Positive control: the same call path accepts a valid id.
     const id = "gate-probe-control";
@@ -732,6 +814,7 @@ const CHECKS = {
   },
 
   async "tool-smoke"() {
+    if (!archivePresent()) return skipped("tool-smoke");
     const expected = skillsOnDisk();
     assert(expected > 0, "no skills found on disk; cannot measure the index independently");
 
@@ -748,14 +831,32 @@ const CHECKS = {
     );
 
     const tree = textOf(responses.get(2));
-    assert(/\d+ entries \(\d+ files, \d+ directories\)/.test(tree), "get_file_tree lost its summary");
+    assert(
+      /\d+ entries \(\d+ files, \d+ directories\)/.test(tree),
+      "get_file_tree lost its summary",
+    );
     assert(!/https?:\/\//.test(tree), "get_file_tree regressed to listing URLs");
 
-    assert(/Found \d+ skills/.test(textOf(responses.get(3))), "search_skills returned nothing usable");
+    assert(
+      /Found \d+ skills/.test(textOf(responses.get(3))),
+      "search_skills returned nothing usable",
+    );
     pass("tool-smoke");
   },
   ledger: checkLedger,
 };
+
+/**
+ * Declare a check skipped because the data it needs is absent.
+ *
+ * Returning rather than silently passing keeps a skip from being counted as a
+ * pass, which is the failure mode that matters: a green battery must never
+ * imply coverage it did not have.
+ */
+function skipped(name) {
+  console.log(`gate-skipped:${name}`);
+  return "skipped";
+}
 
 /**
  * Checks that read the skill archive.
@@ -765,8 +866,6 @@ const CHECKS = {
  * meaningless without it, so they are skipped rather than faked. The skip is
  * printed and counted: a skip must never be mistakable for a pass.
  */
-const ARCHIVE_CHECKS = new Set(["catalog-complete", "filter-advisory", "tool-smoke"]);
-
 function archivePresent() {
   return existsSync(SKILLS_DIR) && readdirSync(SKILLS_DIR).length > 0;
 }
@@ -809,31 +908,23 @@ async function checkLedger() {
 }
 
 async function runAll() {
-  const haveArchive = archivePresent();
-  const names = Object.keys(CHECKS);
   const ran = [];
-  const skipped = [];
+  const didNotRun = [];
 
-  for (const name of names) {
-    if (!haveArchive && ARCHIVE_CHECKS.has(name)) {
-      skipped.push(name);
-      continue;
-    }
-    await CHECKS[name]();
-    ran.push(name);
+  for (const name of Object.keys(CHECKS)) {
+    const outcome = await CHECKS[name]();
+    if (outcome === "skipped") didNotRun.push(name);
+    else ran.push(name);
   }
 
   console.log("");
   console.log(`battery: ${ran.length} passed`);
 
-  if (skipped.length > 0) {
-    const requireArchive = process.env.GATES_REQUIRE_ARCHIVE === "1";
-    console.log(
-      `NOT RUN (${skipped.length}, needs the skill archive at ${SKILLS_DIR}): ${skipped.join(", ")}`,
-    );
-    if (requireArchive) {
+  if (didNotRun.length > 0) {
+    console.log(`NOT RUN (${didNotRun.length}, data absent): ${didNotRun.join(", ")}`);
+    if (process.env.GATES_REQUIRE_ARCHIVE === "1") {
       fail(
-        `GATES_REQUIRE_ARCHIVE=1 but ${skipped.length} archive checks could not run: ${skipped.join(", ")}`,
+        `GATES_REQUIRE_ARCHIVE=1 but ${didNotRun.length} check(s) could not run: ${didNotRun.join(", ")}`,
       );
     }
   }
@@ -851,14 +942,6 @@ if (command === "all") {
   if (!check) {
     console.error(
       `unknown check "${command ?? ""}". Known: ${Object.keys(CHECKS).join(", ")}, all`,
-    );
-    process.exit(2);
-  }
-
-  if (!archivePresent() && ARCHIVE_CHECKS.has(command)) {
-    console.error(
-      `check "${command}" reads the skill archive, which is absent at ${SKILLS_DIR}. ` +
-        "Run it on a full checkout.",
     );
     process.exit(2);
   }

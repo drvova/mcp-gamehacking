@@ -1,14 +1,16 @@
-import { afterEach, beforeAll, describe, expect, it } from "rstack/test";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "rstack/test";
 import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import {
   PROFILES_DIR,
+  ROOT,
   SERVER,
   archivePresent,
   callServer,
   listTools,
   openSession,
   profileIdOf,
+  reportSkipped,
   requireArchive,
   textOf,
   toolCall,
@@ -17,46 +19,30 @@ import {
 } from "./helpers/mcp.js";
 
 /**
- * The seed surface an unrecognised caller starts on.
+ * The design is read from the same data the server reads.
  *
- * This is deliberately not the whole catalogue: a base that fits no model in
- * particular fits every model badly. The complete set is discoverable via
- * `surface` and selectable with the `full` profile.
+ * Restating the catalogue here would create a second source of truth: the list
+ * would keep passing after the manifest changed. The manifest supplies the seed
+ * and the core; the server is asked for the catalogue.
  */
-const SEED_SURFACE = ["surface"];
+function readManifest(): { seed: string; surfaceCore: string[]; pickedId: string } {
+  return JSON.parse(readFileSync(join(ROOT, "profiles", "manifest.json"), "utf8"));
+}
 
-/** Every tool the server registers, in registration order. */
-const FULL_CATALOG = [
-  "research_technique",
-  "analyze_project",
-  "get_agent_briefing",
-  "grep_sources",
-  "find_offset",
-  "compare_projects",
-  "find_similar",
-  "extract_offsets",
-  "search_by_game",
-  "search_by_engine",
-  "get_file_tree",
-  "find_function",
-  "export_offsets",
-  "skill_changelog",
-  "list_skills",
-  "read_skill",
-  "read_source",
-  "search_skills",
-  "skill_stats",
-  "list_agents",
-  "read_agent",
-  "list_subagents",
-  "read_subagent",
-  "list_plugins",
-  "read_plugin",
-  "list_prompts",
-  "read_prompt",
-  "surface",
-  "define_model_profile",
-];
+const MANIFEST = readManifest();
+
+/** The tools the seed surface declares. */
+const SEED_SURFACE: string[] = JSON.parse(
+  readFileSync(join(ROOT, "profiles", `${MANIFEST.seed}.json`), "utf8"),
+).tools.include;
+
+/** Every tool the server registers, asked of the server. */
+async function fullCatalog(): Promise<string[]> {
+  const responses = await callServer([listTools(1, { profile: "full" })]);
+  const names = toolNames(responses.get(1));
+  expect(names.length).toBeGreaterThan(0);
+  return names;
+}
 
 const PROBE_ID = "test-probe-profile";
 
@@ -72,6 +58,9 @@ beforeAll(() => {
   }
 });
 
+// Surface what did not run, so a green suite never implies full coverage.
+afterAll(reportSkipped);
+
 afterEach(cleanupProbe);
 
 describe("model profile surface", () => {
@@ -81,14 +70,14 @@ describe("model profile surface", () => {
     );
 
     expect(names).toEqual(SEED_SURFACE);
-    expect(names.length).toBeLessThan(FULL_CATALOG.length);
+    expect(names.length).toBeLessThan((await fullCatalog()).length);
   });
 
   it("keeps every tool reachable from the seed, since a profile only shapes presentation", async () => {
     // The seed carries a fraction of the catalogue. Every tool it omits must
     // still work by name, so a narrow surface never costs a capability.
     if (!requireArchive("keeps every tool reachable from the seed")) return;
-    const omitted = FULL_CATALOG.filter((name) => !SEED_SURFACE.includes(name));
+    const omitted = (await fullCatalog()).filter((name) => !SEED_SURFACE.includes(name));
     expect(omitted.length).toBeGreaterThan(0);
 
     const responses = await callServer([
@@ -105,8 +94,8 @@ describe("model profile surface", () => {
     const responses = await callServer([toolCall(1, "surface", { list: "tools" })]);
     const catalog = textOf(responses.get(1));
 
-    for (const name of FULL_CATALOG) expect(catalog).toContain(`\`${name}\``);
-    expect(catalog).toContain(`(${FULL_CATALOG.length} registered)`);
+    for (const name of await fullCatalog()) expect(catalog).toContain(`\`${name}\``);
+    expect(catalog).toContain(`(${(await fullCatalog()).length} registered)`);
     expect(catalog).toContain(`(${SEED_SURFACE.length})`);
     expect(catalog).toMatch(/callable by name/);
   });
@@ -237,7 +226,7 @@ describe("per-request overrides", () => {
     const responses = await callServer([listTools(1, { profile: "full" })]);
 
     // Nothing is lost by seeding: the complete surface is one request away.
-    expect(toolNames(responses.get(1))).toEqual(FULL_CATALOG);
+    expect(toolNames(responses.get(1))).toEqual(await fullCatalog());
   });
 });
 
@@ -284,7 +273,7 @@ describe("session override", () => {
 });
 
 describe("surface escape guarantee", () => {
-  const CORE = ["surface"];
+  const CORE = MANIFEST.surfaceCore;
 
   it("carries the surface core on every built-in profile, however narrow", async () => {
     const responses = await callServer([
@@ -364,7 +353,7 @@ describe("composing your own surface", () => {
     const report = textOf((await callServer([toolCall(1, "surface")])).get(1));
 
     expect(report).toMatch(/## Not carried \(\d+\)/);
-    for (const name of FULL_CATALOG) expect(report).toContain(`\`${name}\``);
+    for (const name of await fullCatalog()) expect(report).toContain(`\`${name}\``);
   });
 
   it("composes a surface from chosen names, in the caller's order", async () => {
@@ -418,7 +407,7 @@ describe("composing your own surface", () => {
       expect(toolNames(await session.request(listTools(2)))).toEqual(["search_skills", "surface"]);
 
       await session.request(toolCall(3, "surface", { set: "full" }));
-      expect(toolNames(await session.request(listTools(4)))).toEqual(FULL_CATALOG);
+      expect(toolNames(await session.request(listTools(4)))).toEqual(await fullCatalog());
 
       await session.request(toolCall(5, "surface", { set: "auto" }));
       expect(toolNames(await session.request(listTools(6)))).toEqual(["surface"]);

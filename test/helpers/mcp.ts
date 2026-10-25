@@ -23,21 +23,45 @@ export function archivePresent(): boolean {
   }
 }
 
+const skippedTests: string[] = [];
+
 /**
  * Skip guard for archive-dependent tests.
  *
- * Returns false and prints a loud, greppable notice when the archive is absent.
- * A skip must never be mistakable for a pass, so the notice names the test and
- * says what is missing.
+ * Returns false when the archive is absent so the caller can return early. The
+ * notice goes to stderr, not stdout: a runner may suppress stdout for tests
+ * that pass, which would make a skip indistinguishable from a pass on a green
+ * run. Set GATES_REQUIRE_ARCHIVE=1 to fail instead of skipping.
  */
 export function requireArchive(testName: string): boolean {
   if (archivePresent()) return true;
-  console.log(
-    `[SKIP] ${testName} — the skill archive is absent at ${SKILLS_DIR}. ` +
-      "This test compares against real archive data and is not meaningful without it. " +
-      "Run on a full checkout to include it.",
-  );
+
+  if (process.env.GATES_REQUIRE_ARCHIVE === "1") {
+    throw new Error(
+      `GATES_REQUIRE_ARCHIVE=1 but the skill archive is absent at ${SKILLS_DIR}, ` +
+        `so "${testName}" cannot run.`,
+    );
+  }
+
+  skippedTests.push(testName);
+  process.stderr.write(`[SKIP] ${testName} — no skill archive at ${SKILLS_DIR}\n`);
   return false;
+}
+
+/**
+ * Print what did not run, so a green suite never implies full coverage.
+ *
+ * An early-returning test is counted as a pass by the runner, so without this
+ * the suite reports the same number whether or not the archive was present.
+ */
+export function reportSkipped(): void {
+  if (skippedTests.length === 0) return;
+  const names = skippedTests.map((name) => `  - ${name}`).join("\n");
+  process.stderr.write(
+    `\n[SKIP SUMMARY] ${skippedTests.length} test(s) did not run — the skill archive is absent ` +
+      `at ${SKILLS_DIR}:\n${names}\n` +
+      "These compare against real archive data. Set GATES_REQUIRE_ARCHIVE=1 to fail instead.\n\n",
+  );
 }
 
 /** A parsed JSON-RPC frame; `result` stays unvalidated until a use site parses it. */

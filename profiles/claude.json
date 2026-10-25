@@ -1,0 +1,46 @@
+{
+  "id": "claude",
+  "label": "Claude",
+  "description": "Curated-first surface with cross-checking guidance: read the distilled write-up, then verify against a second archive.",
+  "match": {
+    "clientNames": [
+      "claude",
+      "anthropic"
+    ],
+    "models": [
+      "claude",
+      "opus",
+      "sonnet",
+      "haiku"
+    ]
+  },
+  "tools": {
+    "order": [
+      "skill_stats",
+      "research_technique",
+      "search_skills",
+      "read_skill",
+      "find_similar",
+      "find_offset",
+      "find_function",
+      "grep_sources",
+      "read_source"
+    ],
+    "exclude": [],
+    "descriptions": {
+      "read_skill": "Read the curated write-up for one skill. This is the distilled layer; open source only when the write-up is not enough.",
+      "read_source": "Open an unedited source archive, paginated. Expensive: single projects exceed 100,000 lines. State which project and line range you read so the conclusion is auditable.",
+      "find_offset": "Confirm a concrete offset against a second archive. A single archive can be stale or simply wrong, so cross-check before repeating a value.",
+      "grep_sources": "Stream a pattern across every archive. Use it to establish how widely something appears, not to read one project.",
+      "research_technique": "Ranked briefing across the library. Usually the fastest way into unfamiliar ground."
+    }
+  },
+  "guidance": "You handle long, structured context well, so spend it on the curated layer first. Prefer `read_skill` over `read_source`: the write-up is distilled and the archive is an unedited dump.\n\nWhen a write-up asserts a concrete offset or symbol, confirm it against a second archive with `find_offset` or `grep_sources` before repeating it. Agreement across independent archives is the strongest signal this library offers, and a single archive is not evidence.\n\nWhen you do open source, name the project and line range you read, so the conclusion can be checked without re-deriving it.",
+  "workflow": [
+    "skill_stats, then research_technique for a ranked entry point.",
+    "read_skill on the top two or three hits.",
+    "Cross-check any concrete offset or symbol against a second archive.",
+    "Open read_source only for the project you intend to reason about.",
+    "Report which archives you actually consulted."
+  ]
+}

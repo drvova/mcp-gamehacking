@@ -1,0 +1,48 @@
+{
+  "id": "local",
+  "label": "Local / small model",
+  "description": "Four unambiguous single-argument tools plus the surface core. Avoids multi-step composition and large output.",
+  "match": {
+    "clientNames": [
+      "ollama",
+      "lmstudio",
+      "llama",
+      "local"
+    ],
+    "models": [
+      "llama",
+      "qwen",
+      "mistral",
+      "phi"
+    ]
+  },
+  "tools": {
+    "order": [
+      "search_skills",
+      "read_skill",
+      "skill_stats",
+      "get_file_tree",
+      "surface"
+    ],
+    "include": [
+      "search_skills",
+      "read_skill",
+      "skill_stats",
+      "get_file_tree",
+      "surface"
+    ],
+    "exclude": [],
+    "descriptions": {
+      "search_skills": "Takes a plain query string. If nothing useful comes back, try one distinctive word rather than a sentence.",
+      "read_skill": "Takes one exact skill name, copied from a search result.",
+      "get_file_tree": "Takes a project name and max_entries of at least 10.",
+      "skill_stats": "No arguments. Use it to confirm the library is reachable."
+    }
+  },
+  "guidance": "Four working tools are carried, all with simple arguments, plus the four that describe and change your own surface. Use them one at a time and do not chain steps speculatively.\n\n`search_skills` takes a plain query string; if the first query returns nothing useful, try a single distinctive word rather than a sentence. `read_skill` takes one exact skill name copied from a search result. `get_file_tree` needs a project name and `max_entries` of at least 10.\n\nThe offset, grep and source tools are deliberately absent: they need careful arguments and produce large output. If you need one, `surface` with `list` shows what exists, and `pick` puts it on your surface.",
+  "workflow": [
+    "skill_stats to confirm the library is reachable.",
+    "search_skills with one distinctive word.",
+    "read_skill with the exact name from the result."
+  ]
+}

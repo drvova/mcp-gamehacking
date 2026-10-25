@@ -1,5 +1,4 @@
-import { DEFAULT_PROFILE_ID, SURFACE_TOOLS } from "./builtin.js";
-import { findProfile, loadProfiles } from "./registry.js";
+import { findProfile, loadSurfaces } from "./registry.js";
 import type { ModelProfile, ResolvedProfile } from "./types.js";
 
 /**
@@ -70,49 +69,72 @@ export async function resolveProfile(
   root: string,
   input: ResolveInput = {},
 ): Promise<ResolvedProfile> {
-  const { profiles } = await loadProfiles(root);
+  const { manifest, profiles } = await loadSurfaces(root);
   const all = [...profiles.values()];
 
   const metaProfileId = metaString(input.meta, "profile");
   if (metaProfileId) {
     const profile = await findProfile(root, metaProfileId);
-    if (profile) return { profile, source: "meta-profile", matched: metaProfileId };
+    if (profile)
+      return {
+        profile,
+        source: "meta-profile",
+        matched: metaProfileId,
+        core: manifest.surfaceCore,
+      };
   }
 
   const metaModel = metaString(input.meta, "model");
   if (metaModel) {
     const profile = matchByField(all, "models", metaModel);
-    if (profile) return { profile, source: "meta-model", matched: metaModel };
+    if (profile)
+      return { profile, source: "meta-model", matched: metaModel, core: manifest.surfaceCore };
   }
 
   const session = input.session !== undefined ? input.session : sessionSurface;
   if (session) {
     if (session.kind === "picked") {
-      return { profile: session.profile, source: "session", matched: session.profile.id };
+      return {
+        profile: session.profile,
+        source: "session",
+        matched: session.profile.id,
+        core: manifest.surfaceCore,
+      };
     }
     const profile = await findProfile(root, session.id);
-    if (profile) return { profile, source: "session", matched: session.id };
+    if (profile)
+      return { profile, source: "session", matched: session.id, core: manifest.surfaceCore };
   }
 
   const env = input.env ?? process.env;
   const envSignal = env.MCP_MODEL_PROFILE ?? env.MCP_MODEL;
   if (envSignal) {
     const direct = await findProfile(root, envSignal);
-    if (direct) return { profile: direct, source: "env", matched: envSignal };
+    if (direct)
+      return { profile: direct, source: "env", matched: envSignal, core: manifest.surfaceCore };
     const byModel = matchByField(all, "models", envSignal);
-    if (byModel) return { profile: byModel, source: "env", matched: envSignal };
+    if (byModel)
+      return { profile: byModel, source: "env", matched: envSignal, core: manifest.surfaceCore };
   }
 
   if (input.clientName) {
     const byClient = matchByField(all, "clientNames", input.clientName);
-    if (byClient) return { profile: byClient, source: "client-name", matched: input.clientName };
+    if (byClient)
+      return {
+        profile: byClient,
+        source: "client-name",
+        matched: input.clientName,
+        core: manifest.surfaceCore,
+      };
   }
 
-  const fallback = profiles.get(DEFAULT_PROFILE_ID);
+  const fallback = profiles.get(manifest.seed);
   if (!fallback) {
-    throw new Error(`built-in "${DEFAULT_PROFILE_ID}" profile is missing`);
+    throw new Error(
+      `the manifest names "${manifest.seed}" as the seed surface, but no such surface is defined`,
+    );
   }
-  return { profile: fallback, source: "default", matched: null };
+  return { profile: fallback, source: "seed", matched: null, core: manifest.surfaceCore };
 }
 
 /** The minimum a tool needs to expose for shaping. */
@@ -125,20 +147,25 @@ export type ShapeableTool = { name: string; description?: string };
  * profile whose `include` list matches nothing falls back to the full set: a
  * mistake in a profile must never present an empty tool surface.
  */
-export function shapeTools<T extends ShapeableTool>(tools: T[], profile: ModelProfile): T[] {
+export function shapeTools<T extends ShapeableTool>(
+  tools: T[],
+  profile: ModelProfile,
+  surfaceCore: readonly string[],
+): T[] {
   const available = new Set(tools.map((tool) => tool.name));
   const { include, exclude, order, descriptions } = profile.tools;
 
   // The surface core is enforced here rather than trusted to each profile,
-  // because this is the single chokepoint every profile passes through: built-in,
+  // because this is the single chokepoint every profile passes through: shipped,
   // authored, or hand-edited on disk. A profile may choose to be narrow; it may
   // not choose to be inescapable, so these survive both `include` and `exclude`.
-  const core = new Set(SURFACE_TOOLS);
+  // The core itself is declared in the manifest, not here.
+  const core = new Set(surfaceCore);
 
   let shaped = tools;
   if (include && include.length > 0) {
     const kept = new Set(include.filter((name) => available.has(name)));
-    for (const name of SURFACE_TOOLS) if (available.has(name)) kept.add(name);
+    for (const name of surfaceCore) if (available.has(name)) kept.add(name);
     if (kept.size > 0) shaped = shaped.filter((tool) => kept.has(tool.name));
   }
 

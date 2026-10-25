@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from "rstack/test";
+import { afterAll, beforeAll, describe, expect, it } from "rstack/test";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
@@ -8,6 +8,7 @@ import {
   SERVER,
   SKILLS_DIR,
   callServer,
+  reportSkipped,
   requireArchive,
   textOf,
   toolCall,
@@ -51,6 +52,9 @@ beforeAll(() => {
     throw new Error(`Missing ${SERVER}. Run \`npm run build\` before \`npm test\`.`);
   }
 });
+
+// Surface what did not run, so a green suite never implies full coverage.
+afterAll(reportSkipped);
 
 describe("MCP server contract", () => {
   it("reports the version declared in package.json", async () => {

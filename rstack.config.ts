@@ -49,8 +49,9 @@ define.fmt({
     "subagents/**",
     "plugins/**",
     "prompts/**",
-    // Local-only working artifacts: excluded from git, so they are not source.
-    "GATES.md",
-    ".unlazy/**",
+    // Surface data: the design lives in these files, and reformatting them
+    // would rewrite data to satisfy a code formatter.
+    "profiles/**",
+    "model-profiles/**",
   ],
 });

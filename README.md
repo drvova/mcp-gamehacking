@@ -189,6 +189,57 @@ name even when your surface does not present it, so a narrow surface is a
 presentation choice and never a lost capability — and `surface` always shows the
 delta between what you carry and what exists.
 
+### The design is data
+
+No tool name, surface id, or list appears in the engine. The shape of the system
+lives in files, and the code reads them at runtime:
+
+```
+profiles/manifest.json     seed surface, the core every surface must carry
+profiles/<id>.json         one shipped surface: its tools, order, wording, guidance
+model-profiles/<id>.json   surfaces a model authored, overriding a shipped one
+```
+
+`manifest.json` is the whole system definition:
+
+```jsonc
+{
+  "seed": "default", // where an unrecognised caller lands
+  "surfaceCore": ["surface"], // every surface must carry these, whatever it drops
+  "pickedId": "picked", // id given to a surface composed at runtime
+}
+```
+
+A surface is a file. Adding one, reordering one, changing its wording, or
+changing the core every surface must carry is an edit to data — **no rebuild, no
+source change**:
+
+```jsonc
+// profiles/researcher.json — dropped in, live immediately
+{
+  "id": "researcher",
+  "label": "Researcher",
+  "description": "Search-heavy, with its own wording.",
+  "match": { "clientNames": ["my-research-client"], "models": [] },
+  "tools": {
+    "include": ["search_skills", "read_skill", "find_similar"],
+    "order": ["search_skills", "read_skill", "find_similar"],
+    "descriptions": { "find_similar": "Find alternatives before concluding." },
+  },
+  "guidance": "Written for this surface, at least 80 characters...",
+  "workflow": ["Search.", "Compare.", "Conclude."],
+}
+```
+
+Both directories are read through the same schema, so a shipped surface and a
+model-authored one are the same kind of thing: a shipped one is simply present
+on disk already. A malformed file is reported by `surface` and skipped — one bad
+profile can never stop the server from starting.
+
+This is enforced, not just intended: the `data-driven` gate fails the build if a
+shipped surface id appears in the source, and proves a drop-in file takes effect
+without the built artifact changing.
+
 ### Resolution order
 
 The first match wins:
@@ -375,7 +426,8 @@ mcp-gamehacking/
 +|   +-- builtin.ts            #   built-in profiles
 +|   +-- registry.ts           #   load, validate, persist
 +|   +-- resolve.ts            #   resolution order and tool shaping
-+-- model-profiles/            # Model-authored profiles (JSON)
++-- profiles/                  # SHIPPED surfaces + manifest.json (data)
++-- model-profiles/            # Model-authored surfaces (data, runtime)
 +-- test/                      # Rstest suites
 +-- dist/                      # Compiled JS
 +-- skills/                    # 4,161 skill directories

@@ -1,6 +1,6 @@
 import { mkdir, readFile, readdir, writeFile } from "fs/promises";
 import { join, resolve, sep } from "path";
-import { BUILTIN_PROFILES, DEFAULT_PROFILE_ID } from "./builtin.js";
+import { loadShipped, type Manifest } from "./shipped.js";
 import { ModelProfileSchema, type ModelProfile } from "./types.js";
 
 /**
@@ -9,15 +9,16 @@ import { ModelProfileSchema, type ModelProfile } from "./types.js";
  */
 export const PROFILES_DIR_NAME = "model-profiles";
 
-export type ProfileLoadReport = {
+export type SurfaceLoadReport = {
+  manifest: Manifest;
   profiles: Map<string, ModelProfile>;
   /** Files that were present but unusable, with the reason. */
   invalid: Array<{ file: string; reason: string }>;
 };
 
-let cache: ProfileLoadReport | null = null;
+let cache: SurfaceLoadReport | null = null;
 
-function profilesDir(root: string): string {
+function authoredDir(root: string): string {
   return join(root, PROFILES_DIR_NAME);
 }
 
@@ -29,39 +30,45 @@ function profilesDir(root: string): string {
  * otherwise, so a future schema change cannot silently open a write outside it.
  */
 export function profilePathFor(root: string, id: string): string {
-  const dir = profilesDir(root);
-  const candidate = resolve(dir, `${id}.json`);
-  const boundary = resolve(dir) + sep;
-  if (!candidate.startsWith(boundary)) {
-    throw new Error(`profile id "${id}" resolves outside the profiles directory`);
+  const dir = authoredDir(root);
+  const target = resolve(dir, `${id}.json`);
+  const prefix = resolve(dir) + sep;
+  if (!target.startsWith(prefix)) {
+    throw new Error(`Refusing to write outside the profiles directory: ${id}`);
   }
-  return candidate;
+  return target;
 }
 
 /**
- * Load built-ins plus every authored profile.
+ * Load the shipped surfaces plus every authored one.
  *
- * Built-ins always load; an unreadable or malformed authored file is recorded
- * and skipped. A profile file must never be able to stop the server from
- * starting, so loading fails open while the individual file fails closed.
+ * Shipped surfaces come from `profiles/` on disk rather than from an import, so
+ * the design is data: adding a surface, reordering one, or changing the core
+ * every surface must carry is a file edit, not a code change. Authored profiles
+ * come from `model-profiles/` and override a shipped one of the same id.
+ *
+ * A malformed file is recorded and skipped. One bad profile must never be able
+ * to stop the server from starting: loading fails open while the individual file
+ * fails closed.
  */
-export async function loadProfiles(
+export async function loadSurfaces(
   root: string,
   options: { fresh?: boolean } = {},
-): Promise<ProfileLoadReport> {
+): Promise<SurfaceLoadReport> {
   if (cache && !options.fresh) return cache;
 
+  const shipped = await loadShipped(root);
   const profiles = new Map<string, ModelProfile>();
-  for (const profile of BUILTIN_PROFILES) profiles.set(profile.id, profile);
+  for (const profile of shipped.profiles) profiles.set(profile.id, profile);
 
-  const invalid: ProfileLoadReport["invalid"] = [];
-  const dir = profilesDir(root);
+  const invalid: SurfaceLoadReport["invalid"] = [...shipped.invalid];
+  const dir = authoredDir(root);
 
   let files: string[];
   try {
     files = (await readdir(dir)).filter((name) => name.endsWith(".json"));
   } catch {
-    // No authored profiles yet; built-ins are the whole set.
+    // Nothing authored yet; the shipped set is the whole surface catalogue.
     files = [];
   }
 
@@ -99,31 +106,39 @@ export async function loadProfiles(
     profiles.set(parsed.data.id, parsed.data);
   }
 
-  cache = { profiles, invalid };
-  return cache;
+  const report: SurfaceLoadReport = { manifest: shipped.manifest, profiles, invalid };
+  cache = report;
+  return report;
+}
+
+/**
+ * Ids of the surfaces that ship with the server.
+ *
+ * Anything else in the catalogue was authored by a model, which a listing shows
+ * so a reader can tell the maintained set from the local additions.
+ */
+export async function shippedIds(root: string): Promise<Set<string>> {
+  const { profiles } = await loadShipped(root);
+  return new Set(profiles.map((profile) => profile.id));
 }
 
 /** Look up one profile, refreshing once if an id is unknown to the cache. */
 export async function findProfile(root: string, id: string): Promise<ModelProfile | null> {
-  const cached = await loadProfiles(root);
-  const hit = cached.profiles.get(id);
+  const { profiles } = await loadSurfaces(root);
+  const hit = profiles.get(id);
   if (hit) return hit;
-
-  // A profile may have been authored outside this process; re-read once.
-  const fresh = await loadProfiles(root, { fresh: true });
-  return fresh.profiles.get(id) ?? null;
+  const { profiles: fresh } = await loadSurfaces(root, { fresh: true });
+  return fresh.get(id) ?? null;
 }
 
 /** Validate and persist an authored profile, then refresh the cache. */
 export async function saveProfile(root: string, input: unknown): Promise<ModelProfile> {
-  const profile = ModelProfileSchema.parse(input);
-  const path = profilePathFor(root, profile.id);
-
-  await mkdir(profilesDir(root), { recursive: true });
-  await writeFile(path, `${JSON.stringify(profile, null, 2)}\n`, "utf8");
-
-  cache = null;
-  return profile;
+  const parsed = ModelProfileSchema.parse(input);
+  const path = profilePathFor(root, parsed.id);
+  await mkdir(authoredDir(root), { recursive: true });
+  await writeFile(path, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
+  await loadSurfaces(root, { fresh: true });
+  return parsed;
 }
 
-export { DEFAULT_PROFILE_ID };
+export type { Manifest };

@@ -6,8 +6,7 @@ import { readdir, readFile, stat } from "fs/promises";
 import { join, resolve } from "path";
 import { createReadStream, readFileSync } from "fs";
 import { createInterface } from "readline";
-import { SURFACE_TOOLS } from "./profiles/builtin.js";
-import { loadProfiles, saveProfile } from "./profiles/registry.js";
+import { loadSurfaces, saveProfile, shippedIds } from "./profiles/registry.js";
 import {
   getSessionSurface,
   resolveProfile,
@@ -1890,7 +1889,7 @@ function installProfileAwareToolList(mcp: McpServer): boolean {
     const base = await original(request, extra);
     const resolved = await resolveProfile(PROFILE_ROOT, { meta, clientName, session });
 
-    return { ...base, tools: shapeTools(base.tools, resolved.profile) };
+    return { ...base, tools: shapeTools(base.tools, resolved.profile, resolved.core) };
   });
 
   return true;
@@ -1926,8 +1925,9 @@ async function pickSurface(
     };
   }
 
+  const { manifest } = await loadSurfaces(PROFILE_ROOT);
   const profile = ModelProfileSchema.parse({
-    id: "picked",
+    id: manifest.pickedId,
     label: "Picked",
     description: `Composed for this session: ${known.length} tools.`,
     guidance:
@@ -1955,7 +1955,7 @@ async function applySurface(id: string): Promise<string | null> {
   const previous = getSessionSurface();
   setSessionSurface({ kind: "id", id });
 
-  const { profiles } = await loadProfiles(PROFILE_ROOT);
+  const { profiles } = await loadSurfaces(PROFILE_ROOT);
   if (!profiles.has(id)) {
     // Only roll back if nothing newer has taken over in the meantime.
     if (getSessionSurface()?.kind === "id") setSessionSurface(previous);
@@ -1966,13 +1966,13 @@ async function applySurface(id: string): Promise<string | null> {
 
 /** Enumerate the surfaces, marking the one governing this session. */
 async function renderSurfaces(activeId: string): Promise<string> {
-  const { profiles, invalid } = await loadProfiles(PROFILE_ROOT, { fresh: true });
-  const builtinIds = new Set((await loadProfiles(PROFILE_ROOT)).profiles.keys());
+  const { profiles, invalid } = await loadSurfaces(PROFILE_ROOT, { fresh: true });
+  const shipped = await shippedIds(PROFILE_ROOT);
 
   const rows = [...profiles.values()]
     .sort((a, b) => a.id.localeCompare(b.id))
     .map((profile) => {
-      const origin = builtinIds.has(profile.id) ? "built-in" : "model-authored";
+      const origin = shipped.has(profile.id) ? "shipped" : "model-authored";
       const mark = profile.id === activeId ? " (active)" : "";
       const scope =
         profile.tools.include && profile.tools.include.length > 0
@@ -1996,11 +1996,11 @@ async function renderSurfaces(activeId: string): Promise<string> {
 }
 
 /** Every registered tool, marking what the active surface carries. */
-async function renderCatalogue(profile: ModelProfile): Promise<string> {
+async function renderCatalogue(profile: ModelProfile, core: readonly string[]): Promise<string> {
   const all = await listRegisteredTools();
   if (all.length === 0) return "The tool catalogue is unavailable in this build.";
 
-  const carried = new Set(shapeTools(all, profile).map((tool) => tool.name));
+  const carried = new Set(shapeTools(all, profile, core).map((tool) => tool.name));
   const render = (tools: ToolListResult["tools"]) =>
     tools
       .map((tool) => `- \`${tool.name}\`${tool.description ? ` — ${tool.description}` : ""}`)
@@ -2029,6 +2029,7 @@ async function renderSurface(
   source: string,
   matched: string | null,
   clientName: string | null,
+  core: readonly string[],
 ): Promise<string> {
   const why = matched
     ? `selected by \`${source}\` matching \`${matched}\``
@@ -2039,7 +2040,7 @@ async function renderSurface(
     : "";
 
   const all = await listRegisteredTools();
-  const carried = shapeTools(all, profile).map((tool) => tool.name);
+  const carried = shapeTools(all, profile, core).map((tool) => tool.name);
   const carriedSet = new Set(carried);
   const rest = all.map((tool) => tool.name).filter((name) => !carriedSet.has(name));
 
@@ -2108,16 +2109,16 @@ server.tool(
     }
 
     const session = getSessionSurface();
-    const { profile, source, matched } = await resolveProfile(PROFILE_ROOT, {
+    const { profile, source, matched, core } = await resolveProfile(PROFILE_ROOT, {
       meta,
       clientName,
       session,
     });
 
     if (list === "surfaces") return ok(await renderSurfaces(profile.id));
-    if (list === "tools") return ok(await renderCatalogue(profile));
+    if (list === "tools") return ok(await renderCatalogue(profile, core));
 
-    const report = await renderSurface(profile, source, matched, clientName);
+    const report = await renderSurface(profile, source, matched, clientName, core);
     return ok(composed ? `${composed}\n\n${report}` : report);
   },
 );
@@ -2154,13 +2155,15 @@ server.tool(
     // is added to any explicit include list and removed from any exclude list, so
     // the saved file states what the model actually gets. `shapeTools` enforces
     // the same rule at request time, which also covers hand-edited files.
+    const { manifest } = await loadSurfaces(PROFILE_ROOT);
+    const surfaceCore = manifest.surfaceCore;
     const requested = args.tool_include;
-    const excluded = (args.tool_exclude ?? []).filter((name) => !SURFACE_TOOLS.includes(name));
+    const excluded = (args.tool_exclude ?? []).filter((name) => !surfaceCore.includes(name));
     const droppedFromExclude = (args.tool_exclude ?? []).filter((name) =>
-      SURFACE_TOOLS.includes(name),
+      surfaceCore.includes(name),
     );
     const added =
-      requested === undefined ? [] : SURFACE_TOOLS.filter((name) => !requested.includes(name));
+      requested === undefined ? [] : surfaceCore.filter((name) => !requested.includes(name));
     const include = requested === undefined ? undefined : [...requested, ...added];
 
     let saved;

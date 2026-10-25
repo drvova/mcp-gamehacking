@@ -73,13 +73,22 @@ export const ModelProfileSchema = z.object({
 
 export type ModelProfile = z.infer<typeof ModelProfileSchema>;
 
-/** Why a profile was selected, for transparency in get_model_profile. */
+/**
+ * Why a surface was selected, reported by `surface` so a caller can see the
+ * decision. `seed` means no signal matched and the manifest's seed applies.
+ */
 export type ProfileSource =
-  "meta-profile" | "meta-model" | "session" | "env" | "client-name" | "default";
+  "meta-profile" | "meta-model" | "session" | "env" | "client-name" | "seed";
 
 export type ResolvedProfile = {
   profile: ModelProfile;
   source: ProfileSource;
   /** The raw signal that matched, when there was one. */
   matched: string | null;
+  /**
+   * Tools every surface must carry, from the manifest. Returned with the
+   * resolution so a caller shaping a tool list has the invariant in hand and
+   * cannot accidentally apply a different one.
+   */
+  core: readonly string[];
 };
