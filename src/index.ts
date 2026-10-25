@@ -70,7 +70,23 @@ const INDEX_TTL = 120_000;
 const INDEX_CHUNK = 64;
 
 async function buildIndex(): Promise<Map<string, SkillIndex>> {
-  const entries = await readdir(DIRS.skills, { withFileTypes: true });
+  let entries;
+  try {
+    entries = await readdir(DIRS.skills, { withFileTypes: true });
+  } catch (error) {
+    // A checkout without the archive (sparse clone, CI) should get an
+    // actionable message rather than a bare ENOENT, and must not be left
+    // thinking the library is empty: a missing archive and an empty one are
+    // different problems.
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error(
+        `The skill archive is not present at ${DIRS.skills}. It ships with the repository ` +
+          "but is excluded from sparse checkouts and CI runs, which are 19 GB smaller without it. " +
+          "The agent, subagent, plugin and prompt tools do not depend on it.",
+      );
+    }
+    throw error;
+  }
   const dirs = entries.filter((e) => e.isDirectory()).map((e) => e.name);
   const idx = new Map<string, SkillIndex>();
 

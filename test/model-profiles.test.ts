@@ -4,6 +4,7 @@ import { join } from "node:path";
 import {
   PROFILES_DIR,
   SERVER,
+  archivePresent,
   callServer,
   listTools,
   openSession,
@@ -494,28 +495,55 @@ describe("model-authored profiles", () => {
 });
 
 describe("profile semantics", () => {
-  it("keeps filtered-out tools callable", async () => {
+  it("lists a narrow surface but keeps omitted tools callable", async () => {
     // A profile shapes presentation only, so a narrow profile must never
-    // remove a capability.
+    // remove a capability. The listing half needs no data; the callable half
+    // uses `list_agents`, which reads the agents directory that ships in every
+    // checkout, so this holds even where the skill archive is absent.
     const responses = await callServer([
       listTools(1, { profile: "compact" }),
+      toolCall(2, "list_agents", {}, { profile: "compact" }),
+      toolCall(3, "read_agent", { name: "exploit-developer" }, { profile: "compact" }),
+    ]);
+
+    const listed = toolNames(responses.get(1));
+    expect(listed).not.toContain("list_agents");
+    expect(listed).not.toContain("read_agent");
+
+    expect(wasRefused(responses.get(2))).toBe(false);
+    expect(textOf(responses.get(2))).toMatch(/Available agents \(\d+\)/);
+    expect(wasRefused(responses.get(3))).toBe(false);
+    expect(textOf(responses.get(3))).toContain("# Agent: exploit-developer");
+  });
+
+  it("keeps archive-backed tools callable while a narrow profile omits them", async () => {
+    if (!requireArchive("keeps archive-backed tools callable")) return;
+
+    const responses = await callServer([
       toolCall(
-        2,
+        1,
         "grep_sources",
         { pattern: "DriverEntry", max_files: 1, max_matches_per_file: 1 },
         {
           profile: "compact",
         },
       ),
-      toolCall(3, "read_source", { name: "ags-kdmapper-1909", limit: 3 }, { profile: "compact" }),
+      toolCall(2, "read_source", { name: "ags-kdmapper-1909", limit: 3 }, { profile: "compact" }),
     ]);
 
-    const listed = toolNames(responses.get(1));
-    expect(listed).not.toContain("grep_sources");
-    expect(listed).not.toContain("read_source");
+    expect(wasRefused(responses.get(1))).toBe(false);
+    expect(textOf(responses.get(1)).length).toBeGreaterThan(0);
+    expect(textOf(responses.get(2))).toContain("Source:");
+  });
 
-    expect(textOf(responses.get(2)).length).toBeGreaterThan(0);
-    expect(textOf(responses.get(3))).toContain("Source:");
+  it("says the archive is missing rather than reporting an empty library", async () => {
+    if (archivePresent()) return;
+
+    const response = await callServer([toolCall(1, "skill_stats")]);
+    expect(wasRefused(response.get(1))).toBe(true);
+    const text = textOf(response.get(1));
+    expect(text).toMatch(/skill archive is not present/i);
+    expect(text).not.toMatch(/ENOENT/);
   });
 
   it("carries distinct, substantive guidance per model", async () => {
