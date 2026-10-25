@@ -8,7 +8,7 @@
  * State is isolated to a temp directory through `GAMEHACKING_HARNESS_DIR`:
  * a test must never read or write a real home directory.
  */
-import { afterEach, beforeEach, describe, expect, it } from "rstack/test";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "rstack/test";
 import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,12 +17,18 @@ import {
   callServer,
   listTools,
   openSession,
+  reportSkipped,
+  requireArchive,
   textOf,
   toolCall,
   toolNames,
   wasRefused,
   type Session,
 } from "./helpers/mcp.js";
+
+// A green suite must never imply full coverage: archive-dependent tests skip
+// loudly when the archive is absent, and the summary says how many did not run.
+afterAll(reportSkipped);
 
 let harnessDir = "";
 let session: Session | null = null;
@@ -184,6 +190,7 @@ describe("one long-lived namespace", () => {
 
 describe("the session binds its working objects", () => {
   it("keeps a document open across calls within one session", async () => {
+    if (!requireArchive("keeps a document open across calls within one session")) return;
     await run("(await open('ags-eddeeh-kdmapper')).name", "A");
     // Bound fresh each call, so a document opened in one call is usable in the
     // next rather than having to be reopened.
@@ -192,6 +199,7 @@ describe("the session binds its working objects", () => {
   });
 
   it("does not leak one session's documents into another", async () => {
+    if (!requireArchive("does not leak one session's documents into another")) return;
     await run("await open('ags-eddeeh-kdmapper')", "A");
 
     expect(await run("docs.length", "B")).toBe("0");
@@ -268,12 +276,14 @@ describe("definitions persist across restarts", () => {
 
 describe("the pre-existing capabilities still work from code", () => {
   it("drives a capability and returns its text", async () => {
+    if (!requireArchive("drives a capability and returns its text")) return;
     const output = await run("await search_skills({ query: 'kdmapper' })");
 
     expect(output).toMatch(/skill|kdmapper/i);
   });
 
   it("reaches capabilities through the grouped namespace too", async () => {
+    if (!requireArchive("reaches capabilities through the grouped namespace too")) return;
     const output = await run("await kb.skills.stats()");
 
     expect(output).toMatch(/Total/i);
@@ -289,6 +299,7 @@ describe("the pre-existing capabilities still work from code", () => {
   });
 
   it("opens a document and works on it in-process", async () => {
+    if (!requireArchive("opens a document and works on it in-process")) return;
     const output = await run(
       "const d = await open('ags-eddeeh-kdmapper'); d.headings().slice(0, 2).join(' | ')",
     );
@@ -297,6 +308,9 @@ describe("the pre-existing capabilities still work from code", () => {
   });
 
   it("names what is available when a document does not exist", async () => {
+    // The answer names what IS available, which only exists when the archive
+    // does — an empty list would make the message unverifiable here.
+    if (!requireArchive("names what is available when a document does not exist")) return;
     const output = await run("await open('no-such-document-anywhere')");
 
     expect(output).toMatch(/No document named/);
@@ -304,6 +318,7 @@ describe("the pre-existing capabilities still work from code", () => {
   });
 
   it("is still callable when the harness has never been used", async () => {
+    if (!requireArchive("is still callable when the harness has never been used")) return;
     const responses = await callServer([toolCall(1, "run", { code: "await skill_stats()" })], {
       env: env(),
     });
