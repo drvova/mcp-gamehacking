@@ -13,13 +13,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
-    # The declared floor is exercised deliberately. A harness or source file that
-    # reaches for a newer runtime than package.json promises passes on a modern
-    # local Node and fails here — which is the only place that claim is checked.
+    # The declared floor is exercised deliberately. The build tool requires
+    # Node >= 20 and the runtime floor is the SDK's, so 20 is the honest minimum;
+    # a source or harness file reaching for something newer than package.json
+    # promises passes on a modern local Node and fails here, which is the only
+    # place that claim is checked.
     strategy:
       fail-fast: false
       matrix:
-        node: ["18", "22"]
+        node: ["20", "22"]
 
     steps:
       # The skill archive is 19 GB, so a full checkout does not fit on a runner.

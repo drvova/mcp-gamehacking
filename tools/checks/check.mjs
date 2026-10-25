@@ -20,7 +20,7 @@ import { fileURLToPath } from "node:url";
 /**
  * A promise with its settle functions, without `Promise.withResolvers`.
  *
- * That helper is Node 22+, and this project declares `engines: >=18`. Using it
+ * That helper is Node 22+ while this project supports Node 20. Using it
  * in the harness meant the suite passed on a modern local Node and failed on
  * the runner, which is the one place the declared floor should be exercised.
  */
@@ -444,7 +444,8 @@ const CHECKS = {
     // reaches for a newer API than package.json promises passes on a modern
     // local Node and fails on the runner — which is exactly how this project
     // shipped a `Promise.withResolvers` (Node 22) into a package declaring
-    // `engines: >=18`. This check makes that class of bug local, not remote.
+    // `engines: >=18` while its build tooling needed 20. This check makes that
+    // class of bug local, not remote.
     const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
     const raw = String(pkg.engines?.node ?? "");
     const floor = Number.parseFloat(raw.replace(/[^0-9.]/g, ""));
@@ -468,9 +469,17 @@ const CHECKS = {
         return /\.(ts|mjs|js)$/.test(entry.name) ? [full] : [];
       });
 
-    const files = [join(ROOT, "src"), join(ROOT, "test"), join(ROOT, "tools")]
-      .filter((dir) => existsSync(dir))
-      .flatMap(walk);
+    // Root-level config counts too: rstack.config.ts runs in Node during a build.
+    const rootConfig = readdirSync(ROOT)
+      .filter((name) => /\.(ts|mjs|js)$/.test(name))
+      .map((name) => join(ROOT, name));
+
+    const files = [
+      ...rootConfig,
+      ...[join(ROOT, "src"), join(ROOT, "test"), join(ROOT, "tools")]
+        .filter((dir) => existsSync(dir))
+        .flatMap(walk),
+    ];
     assert(files.length > 0, "found no source files to scan");
 
     // Strip comments: prose naming an API is documentation, not a call.

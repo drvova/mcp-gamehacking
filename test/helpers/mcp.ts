@@ -7,9 +7,9 @@ import { z } from "zod";
 /**
  * A promise with its settle functions, without `Promise.withResolvers`.
  *
- * That helper is Node 22+, and this project declares `engines: >=18`. Using it
- * in the harness meant the suite passed on a modern local Node and failed on
- * the runner, which is the one place the declared floor should be exercised.
+ * That helper is Node 22+ while this project supports Node 20. Using it here
+ * meant the suite passed on a modern local Node and failed on the runner, which
+ * is the one place the declared floor is exercised.
  */
 function deferred<T>() {
   let resolve!: (value: T) => void;

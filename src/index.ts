@@ -18,12 +18,13 @@ import { ModelProfileSchema, PROFILE_ID_MESSAGE, PROFILE_ID_PATTERN } from "./pr
 import type { ModelProfile } from "./profiles/types.js";
 
 /**
- * The package root, without `import.meta.dirname`.
+ * The package root, derived from `import.meta.url`.
  *
- * That property is Node 20.11+, and this package declares `engines: >=18`
- * (the MCP SDK's own floor). Deriving it from `import.meta.url` keeps the
- * declaration true rather than quietly requiring a newer runtime than the
- * package says it needs.
+ * `import.meta.dirname` would be shorter but is Node 20.11+, a patch-level floor
+ * hidden inside a major-version range. The build tooling needs Node >= 20, so
+ * that is what this package declares; the runtime floor is the MCP SDK's own
+ * (>= 18) and this idiom keeps it there, so a prebuilt dist runs on more than
+ * the tooling can build on.
  */
 const HERE = dirname(fileURLToPath(import.meta.url));
 

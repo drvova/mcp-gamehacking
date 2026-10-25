@@ -312,7 +312,7 @@ rejected, so a profile id can never resolve to a path outside `model-profiles/`.
 
 ### Requirements
 
-- Node.js 18+
+- Node.js 20+ (the build tooling requires it; the built server's own floor is the SDK's)
 - npm
 
 ### Build
@@ -526,7 +526,7 @@ Sourced from [awesome-game-security](https://github.com/gmh5225/awesome-game-sec
 
 ## Tech Stack
 
-- **Runtime**: Node.js 18+
+- **Runtime**: Node.js 20+ to build, 18+ to run a prebuilt `dist/`
 - **Language**: TypeScript
 - **Protocol**: MCP via `@modelcontextprotocol/sdk`
 - **Transport**: stdio
