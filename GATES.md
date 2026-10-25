@@ -107,3 +107,7 @@ Scope: A model builds its own tooling. The server ships no base of tools and no 
 - [x] G24: A mistyped key in a constraint or an output rule is refused and named, rather than accepted and silently dropped, and a correctly written rule still works
   CHECK: node tools/checks/check.mjs typo-refused
   EXPECT: gate-passed:typo-refused
+
+- [x] G25: `detail` agrees with the catalogue — a tool the surface defined is explained and its example starts from the tool it wraps, an uncarried registered tool stays explainable (a model inspects one before picking it), and a name that does not exist names what the surface carries
+  CHECK: node tools/checks/check.mjs detail-agrees
+  EXPECT: gate-passed:detail-agrees

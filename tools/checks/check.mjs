@@ -1873,7 +1873,9 @@ const CHECKS = {
         await session.request(toolCall(4, "surface", { detail: "no_such_tool" })),
       );
       assert(/No tool named/.test(missing), "an unknown tool was not reported");
-      assert(missing.includes("read_agent"), "the answer did not say what does exist");
+      // The answer names what the surface actually carries, so it is actionable
+      // rather than just a denial.
+      assert(missing.includes("surface"), "the answer did not say what does exist");
     } finally {
       session.close();
     }
@@ -2303,6 +2305,69 @@ const CHECKS = {
     }
 
     pass("typo-refused");
+  },
+
+  async "detail-agrees"() {
+    // The catalogue lists a tool the surface defined, so `detail` answering "no
+    // such tool" for that same name was the two views disagreeing about what
+    // exists. Same class as the catalogue omitting it: one view knew, one did not.
+    const session = await openSession();
+    try {
+      await session.request(
+        toolCall(1, "surface", {
+          pick: [{ tool: "read_agent", as: "mine", args: { name: "exploit-developer" } }],
+        }),
+      );
+
+      const detail = textOf(await session.request(toolCall(2, "surface", { detail: "mine" })));
+      assert(
+        detail.includes("# mine"),
+        `detail denied a tool the catalogue lists: ${detail.slice(0, 120)}`,
+      );
+      assert(!/No tool named/.test(detail), "detail reported a carried tool as missing");
+      assert(/defined by the surface/.test(detail), "detail did not say the tool is defined");
+      assert(/takes no arguments/.test(detail), "detail did not report the narrowed schema");
+
+      // The example must be USABLE: `mine` is an alias, so naming it as the tool
+      // would produce a pick that fails. It has to start from what it wraps.
+      assert(
+        /tool: "read_agent"/.test(detail) && /as: "mine"/.test(detail),
+        `the example is not usable: ${detail.slice(-260)}`,
+      );
+
+      // A registered tool still reads normally, so the change did not blur the
+      // two kinds together.
+      const registered = textOf(
+        await session.request(toolCall(3, "surface", { detail: "read_agent" })),
+      );
+      assert(registered.includes("# read_agent"), "a registered tool lost its detail view");
+      assert(/Registered tool/.test(registered), "a registered tool is not identified as one");
+      assert(!/defined by the surface/.test(registered), "a registered tool was called defined");
+
+      // A registered tool stays explainable while uncarried: a model inspects one
+      // BEFORE deciding to pick it, so detail cannot be limited to what is carried.
+      const uncarried = textOf(
+        await session.request(toolCall(4, "surface", { detail: "search_skills" })),
+      );
+      assert(uncarried.includes("# search_skills"), "an uncarried registered tool was denied");
+      assert(/not carried/.test(uncarried), "an uncarried tool was not marked as uncarried");
+      assert(
+        /still works if you call it by name/.test(uncarried),
+        "the answer did not say an uncarried tool is still callable",
+      );
+
+      // A name that is neither registered nor defined is reported, and the answer
+      // names what IS carried so it is actionable.
+      const missing = textOf(
+        await session.request(toolCall(5, "surface", { detail: "no_such_tool" })),
+      );
+      assert(/No tool named/.test(missing), "a nonexistent tool was not reported");
+      assert(/This surface carries/.test(missing), "the answer did not name what is carried");
+      assert(missing.includes("mine"), "the answer did not say what is carried");
+    } finally {
+      session.close();
+    }
+    pass("detail-agrees");
   },
 
   ledger: checkLedger,

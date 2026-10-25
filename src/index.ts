@@ -2701,13 +2701,38 @@ function describeArgument(
  * Everything known about one tool, so a model can build against it without
  * discovering its shape by being refused.
  */
-async function renderToolDetail(name: string): Promise<string> {
+async function renderToolDetail(
+  name: string,
+  profile: ModelProfile,
+  core: readonly string[],
+  mutatingArgs: Record<string, string[]>,
+): Promise<string> {
   const all = await listRegisteredTools();
-  const tool = all.find((candidate) => candidate.name === name);
+
+  // Resolve through the SHAPED list, not the registry. A surface may define
+  // tools of its own, and the catalogue now shows them — so `detail` answering
+  // "no such tool" for a name the catalogue just listed was the catalogue and
+  // the detail view disagreeing about what exists.
+  const shaped = shapeTools(all, profile, core, mutatingArgs);
+
+  // Resolution order matters, and both halves are needed:
+  //
+  //   shaped first   — a tool this surface DEFINED exists only here.
+  //   registry second — a model looks a tool up BEFORE picking it, so a
+  //                     registered tool must be explainable while uncarried.
+  //
+  // Searching only the registry denied the surface's own tools; searching only
+  // the shaped list denied every tool the surface does not yet carry.
+  const tool =
+    shaped.find((candidate) => candidate.name === name) ??
+    all.find((candidate) => candidate.name === name);
+
   if (tool === undefined) {
-    const names = all.map((candidate) => candidate.name).join(", ");
-    return `No tool named \`${name}\`. Registered: ${names}`;
+    const names = shaped.map((candidate) => candidate.name).join(", ");
+    return `No tool named \`${name}\`. This surface carries: ${names}`;
   }
+
+  const defined = !all.some((candidate) => candidate.name === name);
 
   const schema = tool.inputSchema;
   const properties = schema?.properties;
@@ -2717,7 +2742,23 @@ async function renderToolDetail(name: string): Promise<string> {
       : [],
   );
 
-  const lines = [`# ${name}`, "", tool.description ?? "(no description)", ""];
+  const lines = [
+    `# ${name}`,
+    "",
+    tool.description ?? "(no description)",
+    "",
+    // Saying which kind it is matters: a defined tool exists only while this
+    // surface is active, and its arguments are already narrowed. A registered
+    // tool that is not carried is still callable by name, and saying so saves a
+    // model from picking it just to try it.
+    defined
+      ? `This tool is defined by the surface \`${profile.id}\` rather than registered, ` +
+        "so it exists only while that surface is active."
+      : shaped.some((candidate) => candidate.name === name)
+        ? `Registered tool, carried by \`${profile.id}\`.`
+        : `Registered tool, not carried by \`${profile.id}\` — it still works if you call it by name.`,
+    "",
+  ];
 
   if (properties === undefined || properties === null || typeof properties !== "object") {
     lines.push("## Arguments", "", "This tool takes no arguments.");
@@ -2737,18 +2778,32 @@ async function renderToolDetail(name: string): Promise<string> {
   // A worked example beats a schema: it shows how this tool is carried, not just
   // what it accepts.
   const first = Object.keys((properties ?? {}) as Record<string, unknown>)[0];
+
+  // The example must be USABLE. For a defined tool the name is an alias, so
+  // naming it as the tool would produce a pick that fails — the example has to
+  // start from the registered tool it wraps. This is the one place the surface's
+  // own definition is the subject rather than a detail of it.
+  const definition = profile.tools.derived.find((entry) => entry.as === name);
+  const base = definition?.tool ?? name;
+  const example = definition
+    ? `surface { pick: [{ tool: "${base}", as: "${name}" }] }`
+    : first === undefined
+      ? `surface { pick: [{ tool: "${base}", as: "mine" }] }`
+      : `surface { pick: [{ tool: "${base}", as: "mine", args: { ${first}: ... } }] }`;
   lines.push(
     "",
     "## Carrying it",
     "",
     "```",
-    first === undefined
-      ? `surface { pick: [{ tool: "${name}", as: "mine" }] }`
-      : `surface { pick: [{ tool: "${name}", as: "mine", args: { ${first}: ... } }] }`,
+    example,
     "```",
     "",
-    "Omit `as` to redefine the tool under its own name. Add `defaults`, `constrain`,",
-    "`output` or `then` to shape how it is called, what it returns, or what runs after it.",
+    definition
+      ? `That is how \`${name}\` is defined on this surface: it wraps \`${base}\`. ` +
+          "Omit `as` to redefine the wrapped tool under its own name, and add `defaults`, " +
+          "`constrain`, `output` or `then` to change how it is called or what it returns."
+      : "Omit `as` to redefine the tool under its own name. Add `defaults`, `constrain`, " +
+          "`output` or `then` to shape how it is called, what it returns, or what runs after it.",
   );
 
   return lines.join("\n");
@@ -3099,7 +3154,9 @@ server.tool(
       );
     }
 
-    if (detail !== undefined) return ok(await renderToolDetail(detail));
+    if (detail !== undefined) {
+      return ok(await renderToolDetail(detail, profile, core, resolved.mutatingArgs));
+    }
     if (list === "surfaces") return ok(await renderSurfaces(profile.id));
     if (list === "tools") return ok(await renderCatalogue(profile, core, resolved.mutatingArgs));
 

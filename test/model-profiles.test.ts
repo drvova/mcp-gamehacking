@@ -1475,12 +1475,33 @@ describe("the catalogue is a catalogue, not a list of names", () => {
   it("says so plainly when asked about a tool that does not exist", async () => {
     const session = await openSession();
     try {
+      // A registered tool is explainable even while uncarried, because a model
+      // looks one up BEFORE deciding to pick it. So the missing case needs a name
+      // that is neither registered nor defined by the surface.
       const detail = textOf(
         await session.request(toolCall(1, "surface", { detail: "no_such_tool" })),
       );
 
       expect(detail).toMatch(/No tool named/);
-      expect(detail).toContain("read_agent");
+      // And it names what the surface DOES carry, so the answer is actionable.
+      expect(detail).toContain("This surface carries");
+    } finally {
+      session.close();
+    }
+  });
+
+  it("explains a registered tool that the surface does not carry", async () => {
+    const session = await openSession();
+    try {
+      // The seed carries only `surface`, so this is the uncarried case — and it
+      // must still explain the tool, or a model cannot inspect one before picking.
+      const detail = textOf(
+        await session.request(toolCall(1, "surface", { detail: "read_agent" })),
+      );
+
+      expect(detail).toContain("# read_agent");
+      expect(detail).toMatch(/not carried/);
+      expect(detail).toMatch(/still works if you call it by name/);
     } finally {
       session.close();
     }
@@ -2041,6 +2062,104 @@ describe("a constraint that does nothing is refused", () => {
       const refused = await session.request(toolCall(2, "ok", { query: "x", limit: 9 }));
       expect(wasRefused(refused)).toBe(true);
       expect(textOf(refused)).toContain("at most 3");
+    } finally {
+      session.close();
+    }
+  });
+});
+
+describe("detail agrees with the catalogue", () => {
+  it("explains a tool the surface defined, rather than denying it exists", async () => {
+    const session = await openSession();
+    try {
+      await session.request(
+        toolCall(1, "surface", {
+          pick: [{ tool: "read_agent", as: "mine", args: { name: "exploit-developer" } }],
+        }),
+      );
+
+      const detail = textOf(await session.request(toolCall(2, "surface", { detail: "mine" })));
+
+      // The catalogue lists it, so the detail view answering "no such tool" was
+      // the two views disagreeing about what exists.
+      expect(detail).toContain("# mine");
+      expect(detail).not.toMatch(/No tool named/);
+      expect(detail).toMatch(/defined by the surface/);
+      expect(detail).toMatch(/takes no arguments/);
+    } finally {
+      session.close();
+    }
+  });
+
+  it("gives a usable example for a defined tool, starting from the tool it wraps", async () => {
+    const session = await openSession();
+    try {
+      await session.request(
+        toolCall(1, "surface", {
+          pick: [{ tool: "read_agent", as: "mine", args: { name: "exploit-developer" } }],
+        }),
+      );
+
+      const detail = textOf(await session.request(toolCall(2, "surface", { detail: "mine" })));
+
+      // `mine` is an alias, not a registered tool, so an example naming it as the
+      // tool would produce a pick that fails. The example has to start from the
+      // registered tool it wraps.
+      expect(detail).toContain('tool: "read_agent"');
+      expect(detail).toContain('as: "mine"');
+      expect(detail).toMatch(/it wraps `read_agent`/);
+    } finally {
+      session.close();
+    }
+  });
+
+  it("says what the surface carries when asked about a name that does not exist", async () => {
+    const session = await openSession();
+    try {
+      await session.request(toolCall(1, "surface", { pick: ["read_agent"] }));
+
+      const detail = textOf(
+        await session.request(toolCall(2, "surface", { detail: "no_such_tool" })),
+      );
+
+      // The answer names what IS carried, so a model is not left guessing.
+      expect(detail).toMatch(/No tool named/);
+      expect(detail).toMatch(/This surface carries/);
+      expect(detail).toContain("read_agent");
+    } finally {
+      session.close();
+    }
+  });
+
+  it("explains an uncarried registered tool while a narrow surface is active", async () => {
+    const session = await openSession();
+    try {
+      await session.request(toolCall(1, "surface", { pick: ["read_agent"] }));
+
+      // Deliberately uncarried: a model inspects a tool before deciding to pick
+      // it, so `detail` cannot be limited to what is already carried.
+      const detail = textOf(
+        await session.request(toolCall(2, "surface", { detail: "search_skills" })),
+      );
+
+      expect(detail).toContain("# search_skills");
+      expect(detail).toMatch(/not carried/);
+      expect(detail).toMatch(/`query` \(string, required/);
+    } finally {
+      session.close();
+    }
+  });
+
+  it("still explains a registered tool normally", async () => {
+    const session = await openSession();
+    try {
+      const detail = textOf(
+        await session.request(toolCall(1, "surface", { detail: "read_agent" })),
+      );
+
+      expect(detail).toContain("# read_agent");
+      expect(detail).toMatch(/Registered tool/);
+      expect(detail).not.toMatch(/defined by the surface/);
     } finally {
       session.close();
     }
