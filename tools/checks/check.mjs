@@ -1310,6 +1310,179 @@ const CHECKS = {
     pass("derived-narrowing");
   },
 
+  async "output-shaping"() {
+    // The mirror of shaping the call. The property that matters most is honesty:
+    // a shaped answer must never read as the whole truth, so every reduction is
+    // reported, and a failure is never shaped at all because a truncated error
+    // hides the reason for the failure.
+    //
+    // Uses `read_agent`, which reads the committed agents/ tree, so this holds on
+    // a runner without the skill archive.
+    const shape = async (output) => {
+      const session = await openSession();
+      try {
+        const composed = await session.request(
+          toolCall(1, "surface", { pick: [{ tool: "read_agent", as: "mine", output }] }),
+        );
+        assert(!composed?.result?.isError, `shaping refused: ${textOf(composed).slice(0, 160)}`);
+        const answered = await session.request(toolCall(2, "mine", { name: "exploit-developer" }));
+        assert(!answered?.result?.isError, `the shaped call failed: ${textOf(answered)}`);
+        return textOf(answered);
+      } finally {
+        session.close();
+      }
+    };
+
+    const whole = await (async () => {
+      const responses = await callServer([
+        toolCall(1, "read_agent", { name: "exploit-developer" }),
+      ]);
+      return textOf(responses.get(1));
+    })();
+
+    // head: a prefix of the whole, and the note says how much was kept.
+    const headed = await shape({ head: 5 });
+    const answer = headed.split("\n\n[shaped:")[0] ?? "";
+    assert(whole.startsWith(answer), "head did not return a prefix of the answer");
+    assert(answer.length < whole.length, "head returned the whole answer, so it proves nothing");
+    assert(
+      /\[shaped: 5 of \d+ lines — head: 5\]/.test(headed),
+      `head did not report the reduction: ${headed.slice(-90)}`,
+    );
+
+    // filter: only matching lines survive, and the rule is named.
+    const filtered = await shape({ filter: "##" });
+    for (const line of filtered.split("\n")) {
+      if (line.length === 0 || line.startsWith("[shaped:")) continue;
+      assert(line.includes("##"), `a line survived the filter that does not match: ${line}`);
+    }
+    assert(/filter: `##`/.test(filtered), "the filter was not named in the note");
+
+    // sections: the named section only, heading included.
+    const sectioned = await shape({ sections: ["Workflow"] });
+    assert(sectioned.includes("## Workflow"), "the requested section is missing");
+    assert(
+      !sectioned.includes("## Available Subagents"),
+      "a section that was not requested survived",
+    );
+
+    // Order is fixed and every rule that acted is named.
+    const combined = await shape({ sections: ["Workflow"], head: 4 });
+    assert(
+      /sections: Workflow; head: 4/.test(combined),
+      `the note does not name both rules in order: ${combined.slice(-90)}`,
+    );
+
+    // Nothing matched is stated, not returned as a blank answer.
+    const nothing = await shape({ filter: "ZZZ_NO_SUCH_THING" });
+    assert(/nothing matched/.test(nothing), `an empty result was not explained: ${nothing}`);
+    assert(/0 of \d+ lines/.test(nothing), "the empty result did not say what it kept");
+
+    // A rule that removed nothing must NOT claim a reduction, or the note is its
+    // own small lie.
+    const noop = await shape({ head: 100000 });
+    assert(!noop.includes("[shaped:"), "a rule that removed nothing still reported a reduction");
+
+    // A failure is never shaped: the reason must survive intact.
+    //
+    // The rule here REMOVES EVERYTHING it is applied to, so if an error were
+    // shaped the reason would vanish entirely. A milder rule would not prove
+    // this: a one-line error survives `head: 1` untouched, which is how an
+    // earlier version of this check passed while errors were being shaped.
+    const failureSession = await openSession();
+    try {
+      await failureSession.request(
+        toolCall(1, "surface", {
+          pick: [{ tool: "read_agent", as: "mine", output: { filter: "ZZZ_NEVER_MATCHES" } }],
+        }),
+      );
+      const failed = await failureSession.request(
+        toolCall(2, "mine", { name: "no-such-agent-xyz" }),
+      );
+      assert(Boolean(failed?.result?.isError), "the failing call was not reported as an error");
+      assert(
+        textOf(failed).includes("no-such-agent-xyz"),
+        "shaping removed the reason for a failure",
+      );
+      assert(!textOf(failed).includes("[shaped:"), "a failure was shaped");
+      assert(
+        !textOf(failed).includes("nothing matched"),
+        "a failure was filtered away by the shaping rule",
+      );
+    } finally {
+      failureSession.close();
+    }
+
+    // A rule that cannot do what it says is refused with the reason.
+    const bad = await callServer([
+      toolCall(1, "surface", {
+        pick: [{ tool: "read_agent", as: "b1", output: { head: 2, tail: 2 } }],
+      }),
+      toolCall(2, "surface", {
+        pick: [{ tool: "read_agent", as: "b2", output: { filter: "[unclosed" } }],
+      }),
+    ]);
+    for (const [id, what] of [
+      [1, "head together with tail"],
+      [2, "a pattern that will not compile"],
+    ]) {
+      const response = bad.get(id);
+      assert(
+        Boolean(response?.error) || Boolean(response?.result?.isError),
+        `${what} was accepted`,
+      );
+    }
+    assert(
+      textOf(bad.get(2)).includes("[unclosed"),
+      "the invalid pattern was not named in the refusal",
+    );
+
+    // And the rule is part of what was built, so it survives the process.
+    const id = "gate-probe-output";
+    const path = cleanupProfile(id);
+    try {
+      const builder = await openSession();
+      try {
+        await builder.request(
+          toolCall(1, "surface", {
+            pick: [{ tool: "read_agent", as: "mine", output: { sections: ["Workflow"] } }],
+          }),
+        );
+        const saved = await builder.request(
+          toolCall(2, "surface", {
+            save: id,
+            guidance:
+              "A gate probe carrying an output rule, to prove the shaping survives a process boundary.",
+          }),
+        );
+        assert(!saved?.result?.isError, `saving failed: ${textOf(saved)}`);
+      } finally {
+        builder.close();
+      }
+
+      const reopened = await openSession();
+      try {
+        await reopened.request(toolCall(1, "surface", { set: id }));
+        const recalled = await reopened.request(toolCall(2, "mine", { name: "exploit-developer" }));
+        assert(
+          textOf(recalled).includes("## Workflow"),
+          "the recalled surface lost the section rule",
+        );
+        assert(
+          !textOf(recalled).includes("## Available Subagents"),
+          "the recalled surface did not apply the section rule",
+        );
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      cleanupProfile(id);
+    }
+
+    assert(!existsSync(path), "cleanup failed to remove the probe surface");
+    pass("output-shaping");
+  },
+
   ledger: checkLedger,
 };
 

@@ -84,6 +84,33 @@ const DerivedToolSchema = z.object({
   description: z.string().min(1).optional(),
   /** Per-argument wording for the arguments that remain. */
   argDescriptions: z.record(z.string(), z.string().min(1)).default({}),
+  /**
+   * How much of the answer to keep. The mirror of shaping the call: a tool that
+   * returns a thousand lines is unusable, and the same tool returning fifty is
+   * not.
+   *
+   * Every reduction is REPORTED in the result, because a shaped answer that
+   * hides its own shaping is the worst outcome available: the model would read
+   * a truncated list as the whole truth. Errors are never shaped.
+   */
+  output: z
+    .object({
+      sections: z
+        .array(z.string().min(1))
+        .optional()
+        .describe("Keep only these markdown sections, by heading"),
+      filter: z.string().optional().describe("Keep only lines matching this regular expression"),
+      reject: z.string().optional().describe("Drop lines matching this regular expression"),
+      head: z.number().int().positive().optional().describe("Keep the first N lines"),
+      tail: z.number().int().positive().optional().describe("Keep the last N lines"),
+      maxChars: z
+        .number()
+        .int()
+        .min(50)
+        .optional()
+        .describe("Keep at most this many characters, ending on a line break where possible"),
+    })
+    .default({}),
 });
 
 /**

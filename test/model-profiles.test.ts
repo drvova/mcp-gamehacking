@@ -865,3 +865,186 @@ describe("defaults and constraints", () => {
     }
   });
 });
+
+describe("shaping the answer", () => {
+  // The mirror of shaping the call. The property that matters most: a shaped
+  // answer must never read as the whole truth, so every reduction is reported.
+  const readWith = async (output: Record<string, unknown>) => {
+    const session = await openSession();
+    try {
+      const composed = await session.request(
+        toolCall(1, "surface", { pick: [{ tool: "read_agent", as: "mine", output }] }),
+      );
+      expect(wasRefused(composed)).toBe(false);
+      return {
+        text: textOf(await session.request(toolCall(2, "mine", { name: "exploit-developer" }))),
+      };
+    } finally {
+      session.close();
+    }
+  };
+
+  it("keeps the first N lines and says how much it kept", async () => {
+    const full = await readWith({});
+    const { text } = await readWith({ head: 5 });
+
+    // What matters: the answer is a strict prefix of the whole, and the note
+    // says how much was kept. Without the note a model reads five lines as the
+    // whole document, which is the failure this feature exists to avoid.
+    const answer = text.split("\n\n[shaped:")[0] ?? "";
+    expect(full.text.startsWith(answer)).toBe(true);
+    expect(answer.length).toBeLessThan(full.text.length);
+    expect(answer.split("\n").length).toBeLessThanOrEqual(5);
+    expect(text).toMatch(/\[shaped: 5 of \d+ lines — head: 5\]/);
+  });
+
+  it("keeps the last N lines", async () => {
+    const { text } = await readWith({ tail: 4 });
+    expect(text).toMatch(/\[shaped: 4 of \d+ lines — tail: 4\]/);
+  });
+
+  it("keeps only lines matching a pattern", async () => {
+    const { text } = await readWith({ filter: "##" });
+
+    for (const line of text.split("\n")) {
+      if (line.length === 0 || line.startsWith("[shaped:")) continue;
+      expect(line).toContain("##");
+    }
+    expect(text).toMatch(/\[shaped: \d+ of \d+ lines — filter: `##`\]/);
+  });
+
+  it("drops lines matching a pattern", async () => {
+    const { text } = await readWith({ reject: "^\\s*$" });
+    expect(text).toMatch(/\[shaped: \d+ of \d+ lines — reject: `\^\\s\*\$`\]/);
+  });
+
+  it("keeps only the named sections, heading included", async () => {
+    const { text } = await readWith({ sections: ["Workflow"] });
+
+    expect(text).toContain("## Workflow");
+    expect(text).not.toContain("## Available Subagents");
+    expect(text).toMatch(/sections: Workflow/);
+  });
+
+  it("applies rules in a fixed order and names every one that acted", async () => {
+    const { text } = await readWith({ sections: ["Workflow"], head: 4 });
+    expect(text).toMatch(/sections: Workflow; head: 4/);
+  });
+
+  it("caps characters without leaving half a word", async () => {
+    const { text } = await readWith({ maxChars: 300 });
+    expect(text).toMatch(/maxChars: 300/);
+    expect(text.length).toBeLessThan(420);
+  });
+
+  it("states plainly that nothing matched, rather than returning nothing", async () => {
+    const { text } = await readWith({ filter: "ZZZ_NO_SUCH_THING" });
+
+    // A blank answer would read as "the tool returned nothing". Saying so is the
+    // difference between a model knowing to loosen the rule and it guessing.
+    expect(text).toMatch(/nothing matched/);
+    expect(text).toMatch(/0 of \d+ lines/);
+  });
+
+  it("adds no note when a rule removed nothing", async () => {
+    // A note claiming a reduction that did not happen would be its own small
+    // lie, so a rule that fits inside the answer is silent.
+    const { text } = await readWith({ head: 10000 });
+    expect(text).not.toContain("[shaped:");
+  });
+
+  it("never shapes how a call failed", async () => {
+    const session = await openSession();
+    try {
+      // The rule removes everything it is applied to, so if an error were shaped
+      // its reason would vanish. A milder rule proves nothing: a one-line error
+      // survives `head: 1` untouched.
+      await session.request(
+        toolCall(1, "surface", {
+          pick: [{ tool: "read_agent", as: "mine", output: { filter: "ZZZ_NEVER_MATCHES" } }],
+        }),
+      );
+
+      // The reason for a failure is the one thing a caller must not lose, so an
+      // error is passed through untouched however destructive the shaping is.
+      const failed = await session.request(toolCall(2, "mine", { name: "no-such-agent-xyz" }));
+      expect(wasRefused(failed)).toBe(true);
+      expect(textOf(failed)).toContain("no-such-agent-xyz");
+      expect(textOf(failed)).not.toContain("[shaped:");
+      expect(textOf(failed)).not.toContain("nothing matched");
+    } finally {
+      session.close();
+    }
+  });
+
+  it("refuses head with tail, which is ambiguous about which end wins", async () => {
+    const session = await openSession();
+    try {
+      const refused = await session.request(
+        toolCall(1, "surface", {
+          pick: [{ tool: "read_agent", as: "mine", output: { head: 2, tail: 2 } }],
+        }),
+      );
+      expect(wasRefused(refused)).toBe(true);
+      expect(textOf(refused)).toMatch(/ambiguous/);
+    } finally {
+      session.close();
+    }
+  });
+
+  it("refuses a pattern that will not compile, naming it", async () => {
+    const session = await openSession();
+    try {
+      const refused = await session.request(
+        toolCall(1, "surface", {
+          pick: [{ tool: "read_agent", as: "mine", output: { filter: "[unclosed" } }],
+        }),
+      );
+      expect(wasRefused(refused)).toBe(true);
+      expect(textOf(refused)).toContain("[unclosed");
+    } finally {
+      session.close();
+    }
+  });
+
+  it("survives a save and a fresh process", async () => {
+    const probe = cleanupProbe();
+    try {
+      const builder = await openSession();
+      try {
+        await builder.request(
+          toolCall(1, "surface", {
+            pick: [{ tool: "read_agent", as: "mine", output: { sections: ["Workflow"] } }],
+          }),
+        );
+        expect(
+          wasRefused(
+            await builder.request(
+              toolCall(2, "surface", {
+                save: PROBE_ID,
+                guidance:
+                  "A surface carrying an output rule, saved to prove the shaping survives a process boundary.",
+              }),
+            ),
+          ),
+        ).toBe(false);
+      } finally {
+        builder.close();
+      }
+
+      const recalled = await openSession();
+      try {
+        await recalled.request(toolCall(1, "surface", { set: PROBE_ID }));
+        const text = textOf(
+          await recalled.request(toolCall(2, "mine", { name: "exploit-developer" })),
+        );
+        expect(text).toContain("## Workflow");
+        expect(text).not.toContain("## Available Subagents");
+      } finally {
+        recalled.close();
+      }
+    } finally {
+      cleanupProbe();
+    }
+  });
+});

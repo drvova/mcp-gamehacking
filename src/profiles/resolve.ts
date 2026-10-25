@@ -217,6 +217,18 @@ export function effectiveDerived<T extends ShapeableTool>(
     });
     if (baseViolation) continue;
 
+    // A pattern that will not compile shapes nothing, and a head together with a
+    // tail is ambiguous about which end wins. Both are refused at construction so
+    // the model is told rather than left with a rule that quietly does nothing.
+    const shaping = entry.output;
+    if (hasShaping(shaping)) {
+      if (shaping.head !== undefined && shaping.tail !== undefined) continue;
+      const patterns = [shaping.filter, shaping.reject].filter(
+        (pattern): pattern is string => pattern !== undefined,
+      );
+      if (patterns.some((pattern) => "problem" in compilePattern(pattern))) continue;
+    }
+
     defined.add(entry.as);
     kept.push(entry);
   }
@@ -348,6 +360,129 @@ export function checkConstraint(value: unknown, rule: Record<string, unknown>): 
   }
 
   return null;
+}
+
+/** Compile a pattern, or report why it cannot be. */
+export function compilePattern(pattern: string): { regex: RegExp } | { problem: string } {
+  try {
+    return { regex: new RegExp(pattern) };
+  } catch {
+    // The message does not depend on why it failed to compile: the pattern is
+    // what the model wrote, and naming it is what lets the model fix it.
+    return { problem: `\`${pattern}\` is not a valid regular expression` };
+  }
+}
+
+/** Whether a shaping rule would do anything. */
+export function hasShaping(rule: ModelProfile["tools"]["derived"][number]["output"]): boolean {
+  if (rule === undefined) return false;
+  return (
+    (rule.sections !== undefined && rule.sections.length > 0) ||
+    rule.filter !== undefined ||
+    rule.reject !== undefined ||
+    rule.head !== undefined ||
+    rule.tail !== undefined ||
+    rule.maxChars !== undefined
+  );
+}
+
+/** Keep the named markdown sections, heading line included. */
+function keepSections(lines: string[], wanted: string[]): string[] {
+  const keep = new Set(wanted.map((name) => name.trim().toLowerCase()));
+  const out: string[] = [];
+  let inside = false;
+
+  for (const line of lines) {
+    const heading = /^#{1,6}\s+(.+?)\s*$/.exec(line);
+    if (heading) inside = keep.has((heading[1] ?? "").trim().toLowerCase());
+    if (inside) out.push(line);
+  }
+
+  return out;
+}
+
+/**
+ * Reduce an answer to the part that was asked for.
+ *
+ * Applied in a fixed order — sections, then line selection, then a line window,
+ * then a character cap — so a rule set means one thing rather than depending on
+ * the order it was written in.
+ *
+ * The reduction is always REPORTED. A shaped answer that hides its own shaping
+ * is the worst outcome available: a model reads a truncated list as the whole
+ * truth and draws a confident wrong conclusion. So when anything is removed the
+ * result says how much was kept of how much, and which rule did it.
+ */
+export function shapeOutput(
+  text: string,
+  rule: ModelProfile["tools"]["derived"][number]["output"],
+): string {
+  if (!hasShaping(rule)) return text;
+
+  const originalLines = text.split("\n");
+  let lines = originalLines;
+  const applied: string[] = [];
+
+  if (rule.sections !== undefined && rule.sections.length > 0) {
+    lines = keepSections(lines, rule.sections);
+    applied.push(`sections: ${rule.sections.join(", ")}`);
+  }
+
+  if (rule.filter !== undefined) {
+    const compiled = compilePattern(rule.filter);
+    if ("regex" in compiled) {
+      lines = lines.filter((line) => compiled.regex.test(line));
+      applied.push(`filter: \`${rule.filter}\``);
+    }
+  }
+
+  if (rule.reject !== undefined) {
+    const compiled = compilePattern(rule.reject);
+    if ("regex" in compiled) {
+      lines = lines.filter((line) => !compiled.regex.test(line));
+      applied.push(`reject: \`${rule.reject}\``);
+    }
+  }
+
+  if (rule.head !== undefined) {
+    lines = lines.slice(0, rule.head);
+    applied.push(`head: ${rule.head}`);
+  }
+
+  if (rule.tail !== undefined) {
+    lines = lines.slice(-rule.tail);
+    applied.push(`tail: ${rule.tail}`);
+  }
+
+  let out = lines.join("\n");
+  let capped = false;
+  if (rule.maxChars !== undefined && out.length > rule.maxChars) {
+    out = out.slice(0, rule.maxChars);
+    // End on a line break where that does not throw most of the allowance away,
+    // so a cap does not leave half a word hanging.
+    const lastBreak = out.lastIndexOf("\n");
+    if (lastBreak > rule.maxChars * 0.5) out = out.slice(0, lastBreak);
+    capped = true;
+    applied.push(`maxChars: ${rule.maxChars}`);
+  }
+
+  const removedLines = lines.length < originalLines.length;
+  const removedChars = out.length < text.length;
+  if (!removedLines && !removedChars) return text;
+
+  const kept = `${lines.length} of ${originalLines.length} lines`;
+  const chars = capped ? `, ${out.length} of ${text.length} characters` : "";
+
+  // The note is deliberately ONE line: the call path lifts it out so a result
+  // made of several blocks states the same rule once, and a multi-line note
+  // could not be separated from the answer it belongs to.
+  //
+  // Nothing left is a result worth stating plainly, not an empty answer.
+  if (out.trim().length === 0) {
+    return `[shaped: nothing matched — ${kept}${chars}; ${applied.join("; ")}]`;
+  }
+
+  return `${out}\n\n[shaped: ${kept}${chars} — ${applied.join("; ")}]`;
 }
 
 /** Say what a derived tool fixed, so the caller knows what it can omit. */

@@ -233,6 +233,56 @@ does.
 name even when your surface does not carry it, so you can finish a task first and
 shape your surface afterwards. `surface` always shows the delta.
 
+### Shaping the answer
+
+The mirror of shaping the call. A tool that returns a thousand lines is unusable;
+the same tool returning fifty is not.
+
+```
+surface { pick: [
+  { tool: "read_agent", as: "who",
+    output: { sections: ["Workflow"], head: 20 } }
+] }
+```
+
+| rule            | keeps                                                  |
+| --------------- | ------------------------------------------------------ |
+| `sections`      | only these markdown sections, heading included         |
+| `filter`        | only lines matching a pattern                          |
+| `reject`        | everything except lines matching a pattern             |
+| `head` / `tail` | the first or last N lines                              |
+| `maxChars`      | a character cap, ending on a line break where possible |
+
+Rules apply in a fixed order — sections, line selection, line window, character
+cap — so a rule set means one thing rather than depending on the order it was
+written in.
+
+**Every reduction is reported.** This is the whole point of the feature, not a
+detail of it:
+
+```
+## Workflow
+
+1. Receive a task or question within the domain
+...
+
+[shaped: 14 of 66 lines — sections: Core Capabilities, Workflow]
+```
+
+A shaped answer that hid its own shaping would be read as the whole truth, and a
+model acting on a truncated list as if it were complete is worse off than one
+that got no answer at all. Three consequences of that rule:
+
+- a rule that removed **nothing** adds no note, so the note never cries wolf;
+- a rule that removed **everything** says so (`nothing matched — 0 of 66 lines`)
+  instead of returning a blank, which would read as "the tool returned nothing";
+- a **failure is never shaped.** The reason for a failure is the one thing a
+  caller must not lose, so errors pass through untouched however destructive the
+  rules are.
+
+`head` with `tail` is refused as ambiguous, and a pattern that will not compile is
+refused by name — a rule that cannot do what it says is worse than no rule.
+
 ### What the server does ship
 
 Exactly one surface, and it is not a choice:

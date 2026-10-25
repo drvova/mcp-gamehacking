@@ -15,6 +15,9 @@ import {
   shapeTools,
   boundArgsFor,
   checkConstraint,
+  compilePattern,
+  hasShaping,
+  shapeOutput,
 } from "./profiles/resolve.js";
 import { ModelProfileSchema, PROFILE_ID_MESSAGE, PROFILE_ID_PATTERN } from "./profiles/types.js";
 import type { ModelProfile } from "./profiles/types.js";
@@ -1860,6 +1863,14 @@ type ToolListHandler = (
   extra: unknown,
 ) => ToolListResult | Promise<ToolListResult>;
 
+/** A content block as the SDK serves it, narrowed to what shaping touches. */
+type ContentBlock = { type?: string; text?: string; [key: string]: unknown };
+type ToolCallResult = { content?: ContentBlock[]; isError?: boolean };
+type ToolCallHandler = (
+  request: unknown,
+  extra: unknown,
+) => ToolCallResult | Promise<ToolCallResult>;
+
 /**
  * The SDK's own `tools/list` handler, kept so the catalogue stays readable even
  * before any client has listed tools.
@@ -1939,7 +1950,10 @@ function installProfileAwareCall(mcp: McpServer): boolean {
     return false;
   }
 
-  const original = handlers.get("tools/call");
+  // The map is typed for `tools/list`; `tools/call` answers with content blocks,
+  // so it is narrowed to its own shape here rather than widening the shared type
+  // to the union of both.
+  const original = handlers.get("tools/call") as ToolCallHandler | undefined;
   if (typeof original !== "function") return false;
 
   protocol.removeRequestHandler("tools/call");
@@ -1984,10 +1998,61 @@ function installProfileAwareCall(mcp: McpServer): boolean {
     // A fixed argument wins last, so nothing the caller sends can undo it.
     Object.assign(merged, entry.args);
 
-    return original(
+    const result = await original(
       { ...request, params: { ...request.params, name: entry.tool, arguments: merged } },
       extra,
     );
+
+    // Shape what came back, never how it failed: a truncated error hides the
+    // reason for the failure, which is the one thing a caller must not lose.
+    if (!hasShaping(entry.output) || result?.isError === true) return result;
+
+    const content = result?.content;
+    if (!Array.isArray(content) || content.length === 0) return result;
+
+    const shaped: ContentBlock[] = [];
+    const notes = new Set<string>();
+
+    for (const item of content) {
+      if (item === null || typeof item !== "object" || item.type !== "text") {
+        shaped.push(item);
+        continue;
+      }
+
+      const text = typeof item.text === "string" ? item.text : "";
+      const next = shapeOutput(text, entry.output);
+
+      // The shaping note is collected rather than kept inline, so a result made
+      // of several blocks states the same rule once instead of per block.
+      const note = /\n?\[shaped: [^\]]*\]$/.exec(next);
+      if (note === null) {
+        shaped.push({ ...item, text: next });
+        continue;
+      }
+
+      const withoutNote = next.slice(0, next.length - note[0].length).trimEnd();
+      if (withoutNote.length === 0) {
+        // The note IS the answer here: everything was removed, so it stands
+        // alone rather than being lifted out and re-attached as a footer.
+        shaped.push({ ...item, text: next.trim() });
+        continue;
+      }
+
+      notes.add(note[0].trim());
+      shaped.push({ ...item, text: withoutNote });
+    }
+
+    if (notes.size === 0) return { ...result, content: shaped };
+
+    // Attach the note to the last text block, so the reduction is stated once at
+    // the end of the answer rather than repeated beside every part of it.
+    const lastText = shaped.map((item) => item.type === "text").lastIndexOf(true);
+    if (lastText >= 0) {
+      const target = shaped[lastText];
+      shaped[lastText] = { ...target, text: `${target.text ?? ""}\n\n${[...notes].join("\n")}` };
+    }
+
+    return { ...result, content: shaped };
   });
 
   return true;
@@ -2005,6 +2070,14 @@ type PickEntry =
       args?: Record<string, unknown>;
       defaults?: Record<string, unknown>;
       constrain?: Record<string, Record<string, unknown>>;
+      output?: {
+        sections?: string[];
+        filter?: string;
+        reject?: string;
+        head?: number;
+        tail?: number;
+        maxChars?: number;
+      };
       description?: string;
       argDescriptions?: Record<string, string>;
     };
@@ -2039,6 +2112,7 @@ async function pickSurface(
             args: entry.args,
             defaults: entry.defaults,
             constrain: entry.constrain,
+            output: entry.output,
             description: entry.description,
             argDescriptions: entry.argDescriptions,
           },
@@ -2153,6 +2227,29 @@ async function pickSurface(
       problems.push(...conflict);
       continue;
     }
+
+    // A rule that cannot do what it says is worse than no rule: a pattern that
+    // will not compile shapes nothing, and head with tail is ambiguous about
+    // which end wins. Both are refused with the reason.
+    const shaping = entry.output;
+    if (shaping !== undefined) {
+      if (shaping.head !== undefined && shaping.tail !== undefined) {
+        problems.push(
+          `\`${alias}\` sets both \`head\` and \`tail\`, which is ambiguous about which end of the ` +
+            "answer to keep; set one",
+        );
+        continue;
+      }
+
+      const badPattern = [shaping.filter, shaping.reject]
+        .filter((pattern): pattern is string => pattern !== undefined)
+        .map((pattern) => compilePattern(pattern))
+        .find((compiled) => "problem" in compiled);
+      if (badPattern !== undefined && "problem" in badPattern) {
+        problems.push(`\`${alias}\`: ${badPattern.problem}`);
+        continue;
+      }
+    }
   }
 
   if (problems.length > 0) {
@@ -2170,6 +2267,7 @@ async function pickSurface(
       entry.args !== undefined ||
       entry.defaults !== undefined ||
       entry.constrain !== undefined ||
+      entry.output !== undefined ||
       entry.description !== undefined;
     if (definesSomething) {
       derived.push({
@@ -2178,6 +2276,7 @@ async function pickSurface(
         args: entry.args ?? {},
         defaults: entry.defaults ?? {},
         constrain: entry.constrain ?? {},
+        output: entry.output ?? {},
         ...(entry.description === undefined ? {} : { description: entry.description }),
         argDescriptions: entry.argDescriptions ?? {},
       });
@@ -2426,6 +2525,19 @@ server.tool(
               .optional()
               .describe(
                 "Narrow what an argument may be: enum, minimum, maximum, minLength, maxLength, pattern. Written into the schema and enforced on the call.",
+              ),
+            output: z
+              .object({
+                sections: z.array(z.string().min(1)).optional(),
+                filter: z.string().optional(),
+                reject: z.string().optional(),
+                head: z.number().int().positive().optional(),
+                tail: z.number().int().positive().optional(),
+                maxChars: z.number().int().min(50).optional(),
+              })
+              .optional()
+              .describe(
+                "Keep only part of the answer: named markdown sections, lines matching (or not matching) a pattern, the first or last N lines, or a character cap. The result always says how much was kept, so a shaped answer never reads as the whole truth.",
               ),
             description: z.string().min(1).optional().describe("Wording to use for it"),
             argDescriptions: z

@@ -79,3 +79,7 @@ Scope: A model builds its own tooling. The server ships no base of tools and no 
 - [x] G17: An argument can be defaulted (stays, omittable, shown) or constrained (narrows and is enforced), the schema says what will actually happen, and a constraint the tool's own default would break is refused rather than shipped
   CHECK: node tools/checks/check.mjs derived-narrowing
   EXPECT: gate-passed:derived-narrowing
+
+- [x] G18: An answer can be shaped (sections, filter, reject, head, tail, maxChars) and every reduction is REPORTED, a rule that removed nothing stays silent, nothing-matched is stated rather than blank, and a failure is never shaped
+  CHECK: node tools/checks/check.mjs output-shaping
+  EXPECT: gate-passed:output-shaping
