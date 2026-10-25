@@ -1,29 +1,12 @@
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { readdir, readFile, stat } from "fs/promises";
 import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
-import { createReadStream, readFileSync } from "fs";
+import { createReadStream, readFileSync, readdirSync } from "fs";
 import { createInterface } from "readline";
-import { loadSurfaces, saveProfile, shippedIds } from "./profiles/registry.js";
-import {
-  getSessionSurface,
-  resolveProfile,
-  setSessionSurface,
-  shapeTools,
-  boundArgsFor,
-  checkConstraint,
-  compilePattern,
-  describeStep,
-  extractValues,
-  hasChain,
-  hasShaping,
-  shapeOutput,
-} from "./profiles/resolve.js";
-import { ModelProfileSchema, PROFILE_ID_MESSAGE, PROFILE_ID_PATTERN } from "./profiles/types.js";
-import type { ModelProfile } from "./profiles/types.js";
+import { createHarness, harnessDir, type Capability } from "./harness.js";
 
 /**
  * The package root, derived from `import.meta.url`.
@@ -37,6 +20,10 @@ import type { ModelProfile } from "./profiles/types.js";
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 const ROOT = resolve(HERE, "..");
+
+/** Env-var prefix and default namespace name: `<ENV_PREFIX>_HARNESS_DIR`. */
+const ENV_PREFIX = "GAMEHACKING";
+const PROJECT = "gamehacking";
 const DIRS = {
   skills: join(ROOT, "skills"),
   agents: join(ROOT, "agents"),
@@ -438,8 +425,9 @@ const server = new McpServer(
     capabilities: { tools: { listChanged: true } },
     instructions:
       "Knowledge base for game hacking and reverse engineering: 4,160 skills, 75 agents, 161 subagents, 114 plugins and 148 prompts, including full source archives for roughly 3,980 projects.\n\n" +
-      "The tool surface is not fixed, and it is not chosen for you. Models do not work equally well on the same tools, so no base set suits everyone; you start with one tool and no working set. Call `surface` with no arguments to see every tool that exists, then build your own working set with `pick` and write it down with `save`.\n\n" +
-      "Nothing is withheld in the meantime: a tool your surface does not carry stays callable by name, so a narrow surface is a presentation choice, never a lost capability.",
+      "There is ONE tool: `run`. It runs code in a namespace that persists across calls and across restarts, and everything this server can do is reached from inside it as a function — the capabilities are not advertised as tools, because no fixed menu suits every model or every target.\n\n" +
+      'Call `run` with empty code for the manual: the vocabulary, how to open a document, and every capability this server offers. Then write code — `await search_skills({ query: "EPT hook" })` — and define helpers, which are still there next call.\n\n' +
+      "SECURITY: `run` executes code with this server's authority. That is what it is, not a mode it can be put into, so there is no code-free alternative and no enable/disable switch. Run this server sandboxed — a container or a VM — as you would a shell.",
   },
 );
 
@@ -711,10 +699,113 @@ server.prompt(
 );
 
 // ============================================================
+// CAPABILITIES
+// ============================================================
+
+/**
+ * Every capability the server can perform, captured rather than registered.
+ *
+ * These are not advertised as tools. They are reachable from code inside the one
+ * tool that is (`run`), which is the design: a fixed catalog of typed verbs is
+ * the wrong interface for a knowledge base whose callers and targets all differ.
+ * The functions below stay exactly as they were — only their registration moved.
+ */
+const capabilities: Capability[] = [];
+
+/**
+ * Register a capability for the code harness instead of advertising it as a tool.
+ *
+ * A thin shim over the tool decorator: the existing capability functions are
+ * untouched, and adding one still means writing one function. Arguments are
+ * validated against the capability's own schema before the handler sees them, so
+ * a call from code gets the same defaults and the same readable errors an MCP
+ * call would — a model that passes a number where a string belongs is told so,
+ * rather than failing somewhere inside.
+ */
+function capability<S extends z.ZodRawShape>(
+  name: string,
+  description: string,
+  schema: S,
+  handler: (args: z.infer<z.ZodObject<S>>) => Promise<unknown>,
+): void {
+  const shape = z.object(schema);
+  capabilities.push({
+    name,
+    description,
+    schema,
+    prepare(args) {
+      const parsed = shape.safeParse(args);
+      if (!parsed.success) {
+        const issues = parsed.error.issues
+          .map((issue) => `${issue.path.join(".") || "arguments"}: ${issue.message}`)
+          .join("; ");
+        throw new Error(`${name}: ${issues}`);
+      }
+      return parsed.data;
+    },
+    // The schema validates the arguments before the handler runs, so the
+    // handler's narrower parameter type is satisfied by construction. The cast
+    // states that boundary rather than widening every capability's own type.
+    handler: handler as unknown as (args: Record<string, unknown>) => Promise<unknown>,
+  });
+}
+
+/**
+ * Open a document by name for the harness's `open()`.
+ *
+ * A skill is named directly; a component is named `kind/name` (`agent/x`,
+ * `plugin/y`), because those share a namespace with skills otherwise.
+ */
+async function openDocumentForHarness(
+  name: string,
+): Promise<{ text: string; path: string | null } | null> {
+  const slash = name.indexOf("/");
+  if (slash > 0) {
+    const kind = name.slice(0, slash).toLowerCase();
+    const rest = name.slice(slash + 1);
+    const dir = (DIRS as Record<string, string | undefined>)[`${kind}s`];
+    if (dir) {
+      const parsed = await readMdByName(dir, rest);
+      if (parsed) {
+        return { text: parsed.body, path: join(dir, `${rest}.md`) };
+      }
+    }
+    return null;
+  }
+
+  const skill = await readSkill(name);
+  if (skill) return { text: skill.body, path: join(DIRS.skills, name, "SKILL.md") };
+
+  // Fall back to the component directories, so a bare name still resolves.
+  for (const dir of [DIRS.agents, DIRS.subagents, DIRS.plugins, DIRS.prompts]) {
+    const parsed = await readMdByName(dir, name);
+    if (parsed) return { text: parsed.body, path: join(dir, `${name}.md`) };
+  }
+  return null;
+}
+
+/** The names this project offers, for the harness manual. */
+function offersForHarnessSync(): string[] {
+  const names: string[] = [];
+  try {
+    for (const dir of [DIRS.skills, DIRS.agents, DIRS.subagents, DIRS.plugins, DIRS.prompts]) {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const name = entry.isDirectory() ? entry.name : entry.name.replace(/\.md$/, "");
+        names.push(name);
+      }
+    }
+  } catch {
+    // A missing data directory is a deployment fact, not a reason to fail the
+    // manual: the capability list is still correct.
+  }
+  return names.sort();
+}
+
+// ============================================================
 // WORKFLOW TOOLS
 // ============================================================
 
-server.tool(
+capability(
   "research_technique",
   "Research a game hacking technique: finds relevant skills by scored keyword search across the indexed library. Returns consolidated briefing.",
   {
@@ -776,7 +867,7 @@ server.tool(
   },
 );
 
-server.tool(
+capability(
   "analyze_project",
   "Deep-analyze an archived project: reads SKILL.md + source code, classifies technique, provides structured assessment.",
   {
@@ -816,7 +907,7 @@ server.tool(
   },
 );
 
-server.tool(
+capability(
   "get_agent_briefing",
   "Load an agent definition with all available subagents and plugins listed. Returns a ready-to-use system prompt.",
   {
@@ -845,7 +936,7 @@ server.tool(
 // GREP / FULL-TEXT SEARCH
 // ============================================================
 
-server.tool(
+capability(
   "grep_sources",
   "Full-text search across all 3,985 source code archives. Streams through source.txt files matching a regex pattern. Use for finding specific offsets, function names, patterns, struct definitions.",
   {
@@ -911,7 +1002,7 @@ server.tool(
 // OFFSET CROSS-REFERENCE
 // ============================================================
 
-server.tool(
+capability(
   "find_offset",
   "Cross-reference a game offset, pattern, or struct name across all archived source code. Finds every project that uses a specific offset value or field name.",
   {
@@ -960,7 +1051,7 @@ server.tool(
 // COMPARE PROJECTS TOOL
 // ============================================================
 
-server.tool(
+capability(
   "compare_projects",
   "Side-by-side comparison of two cheat projects: architecture, techniques, features, detection surface.",
   {
@@ -1008,7 +1099,7 @@ server.tool(
 // FIND SIMILAR
 // ============================================================
 
-server.tool(
+capability(
   "find_similar",
   "Find projects similar to a given one based on topic and description overlap. Great for finding alternative implementations of the same technique.",
   {
@@ -1051,7 +1142,7 @@ server.tool(
 // EXTRACT OFFSETS
 // ============================================================
 
-server.tool(
+capability(
   "extract_offsets",
   "Parse a project's source code and extract all hex offsets (0x...) with surrounding context. Instant offset dump from any cheat.",
   {
@@ -1096,7 +1187,7 @@ server.tool(
 // SEARCH BY GAME / ENGINE
 // ============================================================
 
-server.tool(
+capability(
   "search_by_game",
   "Find all skills/projects targeting a specific game. Searches name, description, topics, and games metadata.",
   {
@@ -1148,7 +1239,7 @@ server.tool(
   },
 );
 
-server.tool(
+capability(
   "search_by_engine",
   "Find all skills/projects targeting a specific game engine.",
   {
@@ -1194,7 +1285,7 @@ server.tool(
 // FILE TREE
 // ============================================================
 
-server.tool(
+capability(
   "get_file_tree",
   "Parse a project's source.txt and show its file/directory tree structure (without file contents). Quick project structure overview.",
   {
@@ -1275,7 +1366,7 @@ server.tool(
 // FIND FUNCTION
 // ============================================================
 
-server.tool(
+capability(
   "find_function",
   "Search for a function definition/declaration across all source archives. Matches C/C++ function signatures, class methods, NTSTATUS routines, etc.",
   {
@@ -1323,7 +1414,7 @@ server.tool(
 // EXPORT OFFSETS
 // ============================================================
 
-server.tool(
+capability(
   "export_offsets",
   "Collect all hex offsets for a specific game across all skills and export as a C++ header. Aggregates offsets from every project targeting that game.",
   {
@@ -1395,7 +1486,7 @@ server.tool(
 // SKILL CHANGELOG (offset diff between two game projects)
 // ============================================================
 
-server.tool(
+capability(
   "skill_changelog",
   "Compare offsets between two projects targeting the same game. Shows which offsets changed, were added, or removed. Useful for tracking game updates.",
   {
@@ -1677,7 +1768,7 @@ server.prompt(
 // SKILL TOOLS -- direct access
 // ============================================================
 
-server.tool(
+capability(
   "list_skills",
   "List skills with optional filtering. Uses in-memory index for fast lookup.",
   {
@@ -1704,7 +1795,7 @@ server.tool(
   },
 );
 
-server.tool(
+capability(
   "read_skill",
   "Read a skill's SKILL.md content with full metadata.",
   {
@@ -1718,7 +1809,7 @@ server.tool(
   },
 );
 
-server.tool(
+capability(
   "read_source",
   "Read a project's source code snapshot with pagination.",
   {
@@ -1739,7 +1830,7 @@ server.tool(
   },
 );
 
-server.tool(
+capability(
   "search_skills",
   "Scored keyword search across the indexed skill library (name + description + topics + games + engines).",
   {
@@ -1775,7 +1866,7 @@ server.tool(
   },
 );
 
-server.tool("skill_stats", "Library statistics from the in-memory index.", {}, async () => {
+capability("skill_stats", "Library statistics from the in-memory index.", {}, async () => {
   const idx = await getIndex();
   let withSource = 0;
   let agsCount = 0;
@@ -1818,7 +1909,7 @@ const componentTools = [
 ] as const;
 
 for (const { singular, plural, dir } of componentTools) {
-  server.tool(
+  capability(
     `list_${plural}`,
     `List all available ${plural} grouped by category.`,
     {
@@ -1834,7 +1925,7 @@ for (const { singular, plural, dir } of componentTools) {
     },
   );
 
-  server.tool(
+  capability(
     `read_${singular}`,
     `Read a ${singular}'s full definition and system prompt.`,
     {
@@ -1853,1358 +1944,80 @@ for (const { singular, plural, dir } of componentTools) {
 }
 
 // ============================================================
-// MODEL PROFILES
+// THE TOOL
 // ============================================================
 
-/** Root that holds the archive data and the model-authored profiles. */
-const PROFILE_ROOT = ROOT;
-
-type ToolListResult = {
-  tools: Array<{
-    name: string;
-    description?: string;
-    /** Present on every SDK-registered tool; the shaper narrows it for aliases. */
-    inputSchema?: Record<string, unknown>;
-  }>;
-};
-type ToolListHandler = (
-  request: unknown,
-  extra: unknown,
-) => ToolListResult | Promise<ToolListResult>;
-
-/** A content block as the SDK serves it, narrowed to what shaping touches. */
-type ContentBlock = { type?: string; text?: string; [key: string]: unknown };
-type ToolCallResult = { content?: ContentBlock[]; isError?: boolean };
-type ToolCallHandler = (
-  request: unknown,
-  extra: unknown,
-) => ToolCallResult | Promise<ToolCallResult>;
-
-/**
- * The SDK's own `tools/list` handler, kept so the catalogue stays readable even
- * before any client has listed tools.
- */
-let rawToolListHandler: ToolListHandler | null = null;
-
-/** Every registered tool, unshaped by any profile. */
-async function listRegisteredTools(): Promise<ToolListResult["tools"]> {
-  if (!rawToolListHandler) return [];
-  // The SDK validates the request before dispatching, so pass a well-formed one
-  // even though the handler itself ignores it.
-  const base = await rawToolListHandler({ method: "tools/list", params: {} }, {});
-  return base.tools;
-}
-
-/**
- * Re-present `tools/list` in the order and scope the active profile declares.
- *
- * McpServer keeps its handlers in a private map with no public accessor, so the
- * existing handler is read through a narrow structural type and wrapped, instead
- * of reimplementing the SDK's own schema conversion. If that internal shape is
- * ever absent the SDK handler is left untouched and the raw surface is served:
- * the profile layer degrades to a no-op rather than breaking the server.
- */
-function installProfileAwareToolList(mcp: McpServer): boolean {
-  const protocol = mcp.server as unknown as {
-    _requestHandlers?: Map<string, ToolListHandler>;
-    removeRequestHandler?: (method: string) => void;
-  };
-
-  const handlers = protocol._requestHandlers;
-  if (!(handlers instanceof Map) || typeof protocol.removeRequestHandler !== "function") {
-    return false;
-  }
-
-  const original = handlers.get("tools/list");
-  if (typeof original !== "function") return false;
-  rawToolListHandler = original;
-
-  protocol.removeRequestHandler("tools/list");
-  mcp.server.setRequestHandler(ListToolsRequestSchema, async (request, extra) => {
-    // Snapshot request-scoped inputs before awaiting anything, so a later
-    // pipelined request cannot change what this one resolves to.
-    const meta = extra?._meta;
-    const clientName = mcp.server.getClientVersion()?.name ?? null;
-    const session = getSessionSurface();
-
-    const base = await original(request, extra);
-    const resolved = await resolveProfile(PROFILE_ROOT, { meta, clientName, session });
-
-    return {
-      ...base,
-      tools: shapeTools(base.tools, resolved.profile, resolved.core, resolved.mutatingArgs),
-    };
-  });
-
-  return true;
-}
-
-/** The text of a result, before any shaping is applied to it. */
-function rawTextOf(result: ToolCallResult): string {
-  const content = result?.content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .filter((item) => item !== null && typeof item === "object" && item.type === "text")
-    .map((item) => (typeof item.text === "string" ? item.text : ""))
-    .join("\n");
-}
-
-/**
- * Run a chain: each step is fed values extracted from the previous answer.
- *
- * The four ways this can fail are all reported the same way — loudly, with the
- * step named — because a chain that half-runs and says nothing useful is the
- * worst outcome available. A model cannot debug a sequence it cannot see, so:
- *
- * - a step that returns an error stops the chain and reports that step;
- * - an extraction that matches nothing stops the chain and shows the pattern
- *   together with the start of the answer it was matched against, which is what
- *   the model needs to fix the pattern;
- * - a pattern that does not compile is refused before anything runs;
- * - fewer matches than `take` is not a failure, but it IS reported, because
- *   silently reading one of the three things you asked for is the kind of lie
- *   this whole design keeps refusing to tell.
- */
-async function runChain(
-  entry: ModelProfile["tools"]["derived"][number],
-  profile: ModelProfile,
-  registered: ToolListResult["tools"],
-  mutating: Record<string, string[]>,
-  first: string,
-  call: (name: string, args: Record<string, unknown>) => ToolCallResult | Promise<ToolCallResult>,
-): Promise<{ failure: string } | { text: string; trace: string[] }> {
-  const trace: string[] = [];
-  // Two views of the same data, kept apart on purpose:
-  //
-  //   raw     — what extraction reads. Always the unshaped answer, so a rule
-  //             meant for the reader can never decide what flows between steps.
-  //   display — what the caller reads: shaped, and labelled for fan-out.
-  //
-  // These were one variable once, which made extraction read the RAW answer for
-  // step 2 and the SHAPED one for step 3 — the same chain behaving differently
-  // by position, and the opposite of what this file promises.
-  let raw = first;
-  let display = first;
-
-  for (const [index, step] of entry.then.entries()) {
-    // Steps are numbered from 2: the tool this chain belongs to is step 1.
-    const position = index + 2;
-    const names = Object.keys(step.extract);
-
-    // A step may call a tool this surface defined. Its fixed arguments apply,
-    // and its own chain does not: nesting chains would make the sequence
-    // something to work out rather than read.
-    const alias = boundArgsFor(profile, step.tool, registered, mutating);
-    const targetName = alias?.tool ?? step.tool;
-
-    const perArgument = new Map<string, string[]>();
-    const capped: string[] = [];
-    for (const name of names) {
-      const outcome = extractValues(raw, step.extract[name] ?? "");
-      if ("problem" in outcome) {
-        return { failure: `Step ${position} (${step.tool}): ${outcome.problem}` };
-      }
-      if (outcome.capped) capped.push(name);
-      perArgument.set(name, outcome.values);
-    }
-
-    // A capped extraction is reported rather than swallowed: the pattern matched
-    // more than the cap, so the values in hand are the first fifty and the model
-    // needs to know that before reasoning about them.
-    if (capped.length > 0) {
-      trace.push(
-        `[${position}] ${step.tool}: ${capped.join(", ")} matched more than 50 values, ` +
-          "so only the first 50 are available — narrow the pattern to see the rest",
-      );
-    }
-
-    const matched =
-      names.length === 0 ? 1 : Math.min(...[...perArgument.values()].map((v) => v.length));
-
-    if (names.length > 0 && matched === 0) {
-      const patterns = names.map((name) => `\`${name}\` ← \`${step.extract[name]}\``).join(", ");
-      return {
-        failure:
-          `Step ${position} (${step.tool}) cannot run: nothing matched ${patterns} in the previous ` +
-          `answer, which began:\n\n${raw.slice(0, 400)}`,
-      };
-    }
-
-    const wanted = Math.min(step.take, matched);
-    if (matched < step.take) {
-      trace.push(
-        `[${position}] ${step.tool}: asked for ${step.take}, only ${matched} matched — running ${wanted}`,
-      );
-    }
-
-    const raws: string[] = [];
-    const showns: string[] = [];
-    for (let pickIndex = 0; pickIndex < wanted; pickIndex++) {
-      const args: Record<string, unknown> = { ...(alias?.args ?? {}) };
-      for (const name of names) args[name] = perArgument.get(name)?.[pickIndex];
-
-      const answered = await call(targetName, args);
-      const text = rawTextOf(answered);
-      trace.push(describeStep(position, targetName, args, text.length));
-
-      if (answered?.isError === true) {
-        return {
-          failure: `Step ${position} (${targetName}) failed, so the chain stopped. Its error:\n\n${text}`,
-        };
-      }
-
-      raws.push(text);
-
-      // Shape each result BEFORE labelling it. A label is structure, not
-      // content: a `sections` rule that stripped it would leave several results
-      // with no way to tell which is which, which is the exact class of lie this
-      // design keeps refusing to tell. Shaping per result also means the note
-      // reports each result's own reduction rather than the total.
-      const shown = hasShaping(entry.output) ? shapeOutput(text, entry.output) : text;
-      showns.push(wanted > 1 ? `--- ${briefArgs(args)} ---\n${shown}` : shown);
-    }
-
-    // Extraction reads the unshaped answers; the caller reads the shaped ones.
-    raw = raws.join("\n\n");
-    display = showns.join("\n\n");
-  }
-
-  return { text: display, trace };
-}
-
-/** A step's arguments written short, to label one of several fanned-out results. */
-function briefArgs(args: Record<string, unknown>): string {
-  return Object.entries(args)
-    .map(([key, value]) => `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`)
-    .join(", ");
-}
-
-/**
- * Make a derived tool work when it is called.
- *
- * A surface that only narrowed the listing would be a lie: the caller would see
- * a tool with two arguments and get a failure for omitting the other four. So
- * the bound arguments are merged here, at the single point every call passes
- * through, and the base tool is invoked with them.
- *
- * Bound arguments win over anything the caller sends. They left the schema, so a
- * caller that sends one is reaching past what it was shown, and honouring that
- * would undo the binding the model asked for.
- */
-function installProfileAwareCall(mcp: McpServer): boolean {
-  const protocol = mcp.server as unknown as {
-    _requestHandlers?: Map<string, ToolListHandler>;
-    removeRequestHandler?: (method: string) => void;
-  };
-
-  const handlers = protocol._requestHandlers;
-  if (!(handlers instanceof Map) || typeof protocol.removeRequestHandler !== "function") {
-    return false;
-  }
-
-  // The map is typed for `tools/list`; `tools/call` answers with content blocks,
-  // so it is narrowed to its own shape here rather than widening the shared type
-  // to the union of both.
-  const original = handlers.get("tools/call") as ToolCallHandler | undefined;
-  if (typeof original !== "function") return false;
-
-  protocol.removeRequestHandler("tools/call");
-  mcp.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
-    // Snapshot request-scoped inputs before awaiting anything, so a later
-    // pipelined request cannot change what this one resolves to.
-    const meta = extra?._meta;
-    const clientName = mcp.server.getClientVersion()?.name ?? null;
-    const session = getSessionSurface();
-
-    const resolved = await resolveProfile(PROFILE_ROOT, { meta, clientName, session });
-    // Resolved against the same registered list the listing was shaped from, so
-    // an alias is callable exactly while the surface defines it.
-    const entry = boundArgsFor(
-      resolved.profile,
-      request.params.name,
-      await listRegisteredTools(),
-      resolved.mutatingArgs,
-    );
-    if (entry === null) return original(request, extra);
-
-    const supplied = request.params.arguments ?? {};
-    const merged: Record<string, unknown> = { ...supplied };
-
-    // A default applies only where the caller said nothing. This is the
-    // difference from a fixed argument, which wins regardless.
-    for (const [key, value] of Object.entries(entry.defaults)) {
-      if (!(key in merged)) merged[key] = value;
-    }
-
-    // A constraint narrows what the caller may send, so it is enforced here
-    // rather than only written into the schema: a schema that lists an enum
-    // while the server accepts anything is a lie.
-    const violations: string[] = [];
-    for (const [key, rule] of Object.entries(entry.constrain)) {
-      if (!(key in merged)) continue;
-      const problem = checkConstraint(merged[key], rule);
-      if (problem !== null) violations.push(`\`${key}\` ${problem}`);
-    }
-    if (violations.length > 0) {
-      return err(
-        `\`${request.params.name}\` refused that call:\n` +
-          violations.map((line) => `- ${line}`).join("\n"),
-      );
-    }
-
-    // A fixed argument wins last, so nothing the caller sends can undo it.
-    Object.assign(merged, entry.args);
-
-    const registered = await listRegisteredTools();
-    const result = await original(
-      { ...request, params: { ...request.params, name: entry.tool, arguments: merged } },
-      extra,
-    );
-
-    // A chain replaces the answer: the tool the caller named is step one, and
-    // what they read is where the sequence ended up.
-    if (hasChain(entry)) {
-      const chain = await runChain(
-        entry,
-        resolved.profile,
-        registered,
-        resolved.mutatingArgs,
-        rawTextOf(result),
-        (name, args) =>
-          original({ ...request, params: { ...request.params, name, arguments: args } }, extra),
-      );
-
-      if ("failure" in chain)
-        return err(`\`${request.params.name}\` could not finish:\n\n${chain.failure}`);
-
-      const header = `[chain] ${entry.tool} → ${entry.then.map((step) => step.tool).join(" → ")}`;
-      const footer = [header, ...chain.trace].join("\n");
-
-      // No shaping here: each result was shaped as it was produced, so the
-      // labels and the trace stay outside it. The trace is what makes a chain
-      // debuggable, and a content rule must not be able to eat it.
-      return ok(`${footer}\n\n${chain.text}`);
-    }
-
-    // Shape what came back, never how it failed: a truncated error hides the
-    // reason for the failure, which is the one thing a caller must not lose.
-    if (!hasShaping(entry.output) || result?.isError === true) return result;
-
-    const content = result?.content;
-    if (!Array.isArray(content) || content.length === 0) return result;
-
-    const shaped: ContentBlock[] = [];
-    const notes = new Set<string>();
-
-    for (const item of content) {
-      if (item === null || typeof item !== "object" || item.type !== "text") {
-        shaped.push(item);
-        continue;
-      }
-
-      const text = typeof item.text === "string" ? item.text : "";
-      const next = shapeOutput(text, entry.output);
-
-      // The shaping note is collected rather than kept inline, so a result made
-      // of several blocks states the same rule once instead of per block.
-      const note = /\n?\[shaped: [^\]]*\]$/.exec(next);
-      if (note === null) {
-        shaped.push({ ...item, text: next });
-        continue;
-      }
-
-      const withoutNote = next.slice(0, next.length - note[0].length).trimEnd();
-      if (withoutNote.length === 0) {
-        // The note IS the answer here: everything was removed, so it stands
-        // alone rather than being lifted out and re-attached as a footer.
-        shaped.push({ ...item, text: next.trim() });
-        continue;
-      }
-
-      notes.add(note[0].trim());
-      shaped.push({ ...item, text: withoutNote });
-    }
-
-    if (notes.size === 0) return { ...result, content: shaped };
-
-    // Attach the note to the last text block, so the reduction is stated once at
-    // the end of the answer rather than repeated beside every part of it.
-    const lastText = shaped.map((item) => item.type === "text").lastIndexOf(true);
-    if (lastText >= 0) {
-      const target = shaped[lastText];
-      shaped[lastText] = { ...target, text: `${target.text ?? ""}\n\n${[...notes].join("\n")}` };
-    }
-
-    return { ...result, content: shaped };
-  });
-
-  return true;
-}
-
-/**
- * A tool the caller asked for: a registered name, or one of its own with
- * arguments bound.
- */
-type PickEntry =
-  | string
-  | {
-      tool: string;
-      as?: string;
-      args?: Record<string, unknown>;
-      defaults?: Record<string, unknown>;
-      constrain?: Record<string, Record<string, unknown>>;
-      output?: {
-        sections?: string[];
-        filter?: string;
-        reject?: string;
-        head?: number;
-        tail?: number;
-        maxChars?: number;
-      };
-      then?: Array<{
-        tool: string;
-        extract?: Record<string, string>;
-        take?: number;
-      }>;
-      description?: string;
-      argDescriptions?: Record<string, string>;
-    };
-
-/**
- * Compose an ad-hoc surface from the caller's own choices.
- *
- * Session-scoped and never written to disk: `pick` is the fast path for "these
- * tools, now", while `save` writes it down for later sessions. Unknown names
- * are reported rather than silently dropped, so a typo does not quietly produce
- * a smaller surface than the caller asked for.
- *
- * An entry may bind arguments, which is how a caller builds a tool it can call
- * without getting the call shape wrong: `{ tool: "read_source", as: "read_x",
- * args: { name: "x" } }` lists `read_x` with `name` gone from its schema.
- */
-async function pickSurface(
-  entries: PickEntry[],
-  mutatingArgs: Record<string, string[]>,
-): Promise<{ failure: string } | { profile: ModelProfile; unknown: string[] }> {
-  const all = await listRegisteredTools();
-  if (all.length === 0) return { failure: "The tool catalogue is unavailable in this build." };
-
-  // Normalise once, so the rest of the function has a single shape to reason
-  // about: a bare name is an entry with nothing bound.
-  const wanted = entries
-    .map((entry) =>
-      typeof entry === "string"
-        ? { tool: entry.trim() }
-        : {
-            tool: entry.tool.trim(),
-            alias: entry.as?.trim(),
-            args: entry.args,
-            defaults: entry.defaults,
-            constrain: entry.constrain,
-            output: entry.output,
-            then: entry.then,
-            description: entry.description,
-            argDescriptions: entry.argDescriptions,
-          },
-    )
-    .filter((entry) => entry.tool.length > 0);
-
-  if (wanted.length === 0) {
-    return { failure: "`pick` needs at least one tool name. Call `surface` to see the catalogue." };
-  }
-
-  const available = new Set(all.map((tool) => tool.name));
-  const unknown = [...new Set(wanted.map((entry) => entry.tool))].filter(
-    (name) => !available.has(name),
-  );
-  const known = wanted.filter((entry) => available.has(entry.tool));
-  if (known.length === 0) {
-    return {
-      failure:
-        `None of those tools exist: ${unknown.join(", ")}. ` +
-        "Call `surface` with no arguments to see the catalogue.",
-    };
-  }
-
-  // Validate every entry before building anything, so one call reports all the
-  // problems at once instead of one per round trip.
-  const definitions = new Map(all.map((tool) => [tool.name, tool]));
-  const problems: string[] = [];
-  const seen = new Set<string>();
-
-  for (const entry of known) {
-    const alias = entry.alias || entry.tool;
-
-    if (seen.has(alias)) {
-      problems.push(`\`${alias}\` is defined twice; each name may appear once`);
-      continue;
-    }
-    seen.add(alias);
-
-    // Stealing a different tool's name would make that tool unreachable and the
-    // listing dishonest about what it does. Redefining a tool under its own name
-    // is the documented case, so only a collision with ANOTHER name is refused.
-    if (alias !== entry.tool && available.has(alias)) {
-      problems.push(
-        `\`${alias}\` is already a registered tool, so it cannot be redefined to wrap \`${entry.tool}\`; ` +
-          `name it something else, or omit \`as\` to redefine \`${entry.tool}\` itself`,
-      );
-      continue;
-    }
-
-    // A bound argument that is not a real argument binds nothing: the tool would
-    // advertise the binding and then fail when called. Refuse it and say what
-    // the tool actually takes.
-    const properties = definitions.get(entry.tool)?.inputSchema?.properties;
-    if (properties && typeof properties === "object") {
-      const named = [
-        ...Object.keys(entry.args ?? {}),
-        ...Object.keys(entry.defaults ?? {}),
-        ...Object.keys(entry.constrain ?? {}),
-      ];
-      const bogus = [...new Set(named)].filter((key) => !(key in properties));
-      if (bogus.length > 0) {
-        const real = Object.keys(properties);
-        problems.push(
-          `\`${entry.tool}\` has no argument ${bogus.map((key) => `\`${key}\``).join(", ")}; ` +
-            (real.length > 0
-              ? `it takes ${real.map((key) => `\`${key}\``).join(", ")}`
-              : "it takes no arguments"),
-        );
-        continue;
-      }
-    }
-
-    // A fixed argument always wins, so a default or a constraint for the same
-    // argument would be inert. Say so rather than accepting a no-op.
-    const fixed = new Set(Object.keys(entry.args ?? {}));
-    const inert = [
-      ...Object.keys(entry.defaults ?? {}),
-      ...Object.keys(entry.constrain ?? {}),
-    ].filter((key) => fixed.has(key));
-    if (inert.length > 0) {
-      problems.push(
-        `${inert.map((key) => `\`${key}\``).join(", ")} on \`${entry.tool}\` is fixed and also ` +
-          "given a default or a constraint; a fixed argument wins, so pick one",
-      );
-      continue;
-    }
-
-    // A constraint has to hold for the value that will ACTUALLY be used, not
-    // only for what the caller sends. If the tool's own default falls outside
-    // the narrowed range, the schema would advertise a limit it does not keep,
-    // so the conflict is reported rather than left to surprise a call.
-    const conflict: string[] = [];
-    for (const [key, rule] of Object.entries(entry.constrain ?? {})) {
-      const preset = entry.defaults?.[key];
-      if (preset !== undefined) {
-        const problem = checkConstraint(preset, rule);
-        if (problem !== null) conflict.push(`your default for \`${key}\` ${problem}`);
-        continue;
-      }
-      const baseDefault = (properties as Record<string, { default?: unknown }>)[key]?.default;
-      if (baseDefault !== undefined) {
-        const problem = checkConstraint(baseDefault, rule);
-        if (problem !== null) {
-          conflict.push(
-            `\`${entry.tool}\` already defaults \`${key}\` to ${JSON.stringify(baseDefault)}, ` +
-              `which ${problem} — set a \`defaults\` for it that fits, or loosen the constraint`,
-          );
-        }
-      }
-    }
-    if (conflict.length > 0) {
-      problems.push(...conflict);
-      continue;
-    }
-
-    // A chain step that names nothing, cannot compile its pattern, or fills an
-    // argument that does not exist would fail after the chain had already run
-    // partway. Each is refused here with the reason, so nothing is half-executed
-    // and nothing is silently dropped.
-    for (const [stepIndex, step] of (entry.then ?? []).entries()) {
-      const position = stepIndex + 2;
-
-      // A step may name a tool this same pick defines, so resolve through it.
-      const stepAlias = known
-        .filter(
-          (candidate): candidate is Extract<typeof candidate, { tool: string }> =>
-            typeof candidate !== "string",
-        )
-        .find((candidate) => (candidate.alias ?? candidate.tool) === step.tool);
-
-      const targetTool = stepAlias?.tool ?? step.tool;
-      if (!available.has(targetTool)) {
-        problems.push(
-          `step ${position} calls \`${step.tool}\`, which is neither a registered tool nor one ` +
-            "this surface defines",
-        );
-        continue;
-      }
-
-      // A step may call a defined tool, but not a chain: a fixed sequence is
-      // something a model can read and debug, and nesting makes it a program.
-      if (stepAlias?.then !== undefined && stepAlias.then.length > 0) {
-        problems.push(
-          `step ${position} calls \`${step.tool}\`, which is itself a chain; chains cannot nest, ` +
-            "because a sequence you can read is the point",
-        );
-        continue;
-      }
-
-      // A step may not fill an argument that changes session state. The chain
-      // would reconfigure the caller's own tooling as a side effect of a tool
-      // call, and would change what the remaining steps resolve against, so a
-      // fixed sequence would stop being deterministic. Refused rather than
-      // dropped, because a model that asked for a step and silently did not get
-      // one has been lied to.
-      const mutating = mutatingArgs[targetTool] ?? [];
-      const filled = [...Object.keys(step.extract ?? {}), ...Object.keys(stepAlias?.args ?? {})];
-      const offender = filled.find((name) => mutating.includes(name));
-      if (offender !== undefined) {
-        problems.push(
-          `step ${position} fills \`${offender}\` of \`${targetTool}\`, which changes session ` +
-            "state; a chain must not reconfigure the surface it is running under. Read it instead, " +
-            "or call it outside a chain",
-        );
-        continue;
-      }
-
-      const targetProperties = definitions.get(targetTool)?.inputSchema?.properties;
-      const names = Object.keys(step.extract ?? {});
-      if (
-        targetProperties !== undefined &&
-        targetProperties !== null &&
-        typeof targetProperties === "object"
-      ) {
-        const bogus = names.filter((key) => !(key in targetProperties));
-        if (bogus.length > 0) {
-          const real = Object.keys(targetProperties);
-          problems.push(
-            `step ${position} extracts into ${bogus.map((key) => `\`${key}\``).join(", ")}, which ` +
-              `\`${targetTool}\` does not take; ` +
-              (real.length > 0
-                ? `it takes ${real.map((key) => `\`${key}\``).join(", ")}`
-                : "it takes no arguments"),
-          );
-          continue;
-        }
-      }
-
-      const badPattern = Object.values(step.extract ?? {})
-        .map((pattern) => compilePattern(pattern))
-        .find((compiled) => "problem" in compiled);
-      if (badPattern !== undefined && "problem" in badPattern) {
-        problems.push(`step ${position}: ${badPattern.problem}`);
-        continue;
-      }
-    }
-
-    // A rule that cannot do what it says is worse than no rule: a pattern that
-    // will not compile shapes nothing, and head with tail is ambiguous about
-    // which end wins. Both are refused with the reason.
-    const shaping = entry.output;
-    if (shaping !== undefined) {
-      if (shaping.head !== undefined && shaping.tail !== undefined) {
-        problems.push(
-          `\`${alias}\` sets both \`head\` and \`tail\`, which is ambiguous about which end of the ` +
-            "answer to keep; set one",
-        );
-        continue;
-      }
-
-      const badPattern = [shaping.filter, shaping.reject]
-        .filter((pattern): pattern is string => pattern !== undefined)
-        .map((pattern) => compilePattern(pattern))
-        .find((compiled) => "problem" in compiled);
-      if (badPattern !== undefined && "problem" in badPattern) {
-        problems.push(`\`${alias}\`: ${badPattern.problem}`);
-        continue;
-      }
-    }
-  }
-
-  if (problems.length > 0) {
-    return {
-      failure: `That surface cannot be built:\n${problems.map((line) => `- ${line}`).join("\n")}`,
-    };
-  }
-
-  const derived: ModelProfile["tools"]["derived"] = [];
-  const names: string[] = [];
-  for (const entry of known) {
-    const alias = entry.alias || entry.tool;
-    const definesSomething =
-      alias !== entry.tool ||
-      entry.args !== undefined ||
-      entry.defaults !== undefined ||
-      entry.constrain !== undefined ||
-      entry.output !== undefined ||
-      entry.then !== undefined ||
-      entry.description !== undefined;
-    if (definesSomething) {
-      derived.push({
-        as: alias,
-        tool: entry.tool,
-        args: entry.args ?? {},
-        defaults: entry.defaults ?? {},
-        constrain: entry.constrain ?? {},
-        output: entry.output ?? {},
-        then: (entry.then ?? []).map((step) => ({
-          tool: step.tool,
-          extract: step.extract ?? {},
-          take: step.take ?? 1,
-        })),
-        ...(entry.description === undefined ? {} : { description: entry.description }),
-        argDescriptions: entry.argDescriptions ?? {},
-      });
-    }
-    names.push(alias);
-  }
-
-  const { manifest } = await loadSurfaces(PROFILE_ROOT);
-  const built = ModelProfileSchema.safeParse({
-    id: manifest.pickedId,
-    label: "Picked",
-    description: `Composed for this session: ${names.length} tools.`,
-    guidance:
-      `You composed this surface yourself, from the catalogue, and it holds ${names.length} tools: ` +
-      `${names.join(", ")}. It is session-scoped and nothing was written to disk.\n\n` +
-      "Recompose it with `surface` and `pick` whenever the task changes shape — a surface is a working " +
-      "set, not a commitment. If it turns out to be right, `save` writes it down so later " +
-      "sessions start there.",
-    tools: { include: names, order: names, exclude: [], descriptions: {}, derived },
-    workflow: [],
-  });
-
-  if (!built.success) {
-    // The SDK validates the tool's own parameters, but a profile is built here,
-    // so a mistake in it is reported like every other refusal: a sentence naming
-    // what is wrong. It used to surface as a raw validation dump.
-    const issues = built.error.issues.slice(0, 4).map((issue) => {
-      const where = issue.path.join(".");
-      return where.length > 0 ? `\`${where}\`: ${issue.message}` : issue.message;
-    });
-    return {
-      failure: `That surface cannot be built:\n${issues.map((line) => `- ${line}`).join("\n")}`,
-    };
-  }
-
-  return { profile: built.data, unknown };
-}
-
-async function applySurface(id: string): Promise<string | null> {
-  if (id === "auto") {
-    setSessionSurface(null);
-    return null;
-  }
-
-  // Apply the override before the first await so a pipelined tools/list cannot
-  // resolve ahead of it, then roll back if the id turns out to be unknown.
-  const previous = getSessionSurface();
-  setSessionSurface({ kind: "id", id });
-
-  const { profiles } = await loadSurfaces(PROFILE_ROOT);
-  if (!profiles.has(id)) {
-    // Only roll back if nothing newer has taken over in the meantime.
-    if (getSessionSurface()?.kind === "id") setSessionSurface(previous);
-    return `Unknown surface "${id}". Available: ${[...profiles.keys()].sort().join(", ")}.`;
-  }
-  return null;
-}
-
-/** Enumerate the surfaces, marking the one governing this session. */
-async function renderSurfaces(activeId: string): Promise<string> {
-  const { profiles, invalid } = await loadSurfaces(PROFILE_ROOT, { fresh: true });
-  const shipped = await shippedIds(PROFILE_ROOT);
-
-  const rows = [...profiles.values()]
-    .sort((a, b) => a.id.localeCompare(b.id))
-    .map((profile) => {
-      const origin = shipped.has(profile.id) ? "shipped" : "model-authored";
-      const mark = profile.id === activeId ? " (active)" : "";
-      const scope =
-        profile.tools.include && profile.tools.include.length > 0
-          ? `${profile.tools.include.length} tools`
-          : "every tool";
-      return `- **${profile.id}**${mark} [${origin}] — ${profile.description}\n  Carries: ${scope}`;
-    });
-
-  const problems = invalid.length
-    ? `\n\nUnusable profile files:\n${invalid.map((entry) => `- ${entry.file}: ${entry.reason}`).join("\n")}`
-    : "";
-
-  const wiring = [
-    PROFILES_WIRED
-      ? "Tool listing is profile-aware."
-      : "Tool listing is NOT profile-aware in this build, so every surface presents the full catalogue.",
-    CALLS_WIRED
-      ? "Defined tools resolve when called."
-      : "Defined tools are NOT resolved when called in this build, so a bound argument would not be applied.",
-  ].join(" ");
-
-  return (
-    `# Surfaces (${profiles.size})\n\n${rows.join("\n")}${problems}\n\n${wiring}\n\n` +
-    "Compose your own with `surface` and `pick`, or recall one you saved with `set`."
-  );
-}
-
-/**
- * A tool's arguments, written short enough to sit beside its name.
- *
- * The catalogue used to list names and descriptions only, which meant writing
- * `args`, `constrain` or a chain's `extract` was guesswork until a refusal
- * taught you the argument names. A model building its own tooling needs to see
- * what it is building against, so the shape is published where the tool is.
- */
-function summariseArgs(schema: Record<string, unknown> | undefined): string {
-  const properties = schema?.properties;
-  if (properties === undefined || properties === null || typeof properties !== "object") return "";
-
-  const required = new Set(
-    Array.isArray(schema?.required)
-      ? (schema.required as unknown[]).filter((key): key is string => typeof key === "string")
-      : [],
-  );
-
-  const parts = Object.entries(properties as Record<string, Record<string, unknown>>).map(
-    ([name, definition]) => {
-      const type = typeof definition?.type === "string" ? definition.type : "any";
-      const optional = required.has(name) ? "" : "?";
-      const preset = definition?.default;
-      const shown = preset === undefined ? "" : `=${JSON.stringify(preset)}`;
-      return `${name}${optional}: ${type}${shown}`;
-    },
-  );
-
-  return parts.length === 0 ? " (no arguments)" : ` (${parts.join(", ")})`;
-}
-
-/** One argument explained, for the detail view. */
-function describeArgument(
-  name: string,
-  definition: Record<string, unknown>,
-  required: boolean,
-): string {
-  const type = typeof definition?.type === "string" ? definition.type : "any";
-  const bits = [type, required ? "required" : "optional"];
-
-  const preset = definition?.default;
-  if (preset !== undefined) bits.push(`default ${JSON.stringify(preset)}`);
-  if (Array.isArray(definition?.enum)) {
-    bits.push(`one of ${(definition.enum as unknown[]).map((v) => JSON.stringify(v)).join(", ")}`);
-  }
-  if (typeof definition?.minimum === "number") bits.push(`min ${definition.minimum}`);
-  if (typeof definition?.maximum === "number") bits.push(`max ${definition.maximum}`);
-  if (typeof definition?.minLength === "number") bits.push(`minLength ${definition.minLength}`);
-  if (typeof definition?.maxLength === "number") bits.push(`maxLength ${definition.maxLength}`);
-
-  const text = typeof definition?.description === "string" ? ` — ${definition.description}` : "";
-  return `- \`${name}\` (${bits.join(", ")})${text}`;
-}
-
-/**
- * Everything known about one tool, so a model can build against it without
- * discovering its shape by being refused.
- */
-async function renderToolDetail(
-  name: string,
-  profile: ModelProfile,
-  core: readonly string[],
-  mutatingArgs: Record<string, string[]>,
-): Promise<string> {
-  const all = await listRegisteredTools();
-
-  // Resolve through the SHAPED list, not the registry. A surface may define
-  // tools of its own, and the catalogue now shows them — so `detail` answering
-  // "no such tool" for a name the catalogue just listed was the catalogue and
-  // the detail view disagreeing about what exists.
-  const shaped = shapeTools(all, profile, core, mutatingArgs);
-
-  // Resolution order matters, and both halves are needed:
-  //
-  //   shaped first   — a tool this surface DEFINED exists only here.
-  //   registry second — a model looks a tool up BEFORE picking it, so a
-  //                     registered tool must be explainable while uncarried.
-  //
-  // Searching only the registry denied the surface's own tools; searching only
-  // the shaped list denied every tool the surface does not yet carry.
-  const tool =
-    shaped.find((candidate) => candidate.name === name) ??
-    all.find((candidate) => candidate.name === name);
-
-  if (tool === undefined) {
-    const names = shaped.map((candidate) => candidate.name).join(", ");
-    return `No tool named \`${name}\`. This surface carries: ${names}`;
-  }
-
-  const defined = !all.some((candidate) => candidate.name === name);
-
-  const schema = tool.inputSchema;
-  const properties = schema?.properties;
-  const required = new Set(
-    Array.isArray(schema?.required)
-      ? (schema.required as unknown[]).filter((key): key is string => typeof key === "string")
-      : [],
-  );
-
-  const lines = [
-    `# ${name}`,
-    "",
-    tool.description ?? "(no description)",
-    "",
-    // Saying which kind it is matters: a defined tool exists only while this
-    // surface is active, and its arguments are already narrowed. A registered
-    // tool that is not carried is still callable by name, and saying so saves a
-    // model from picking it just to try it.
-    defined
-      ? `This tool is defined by the surface \`${profile.id}\` rather than registered, ` +
-        "so it exists only while that surface is active."
-      : shaped.some((candidate) => candidate.name === name)
-        ? `Registered tool, carried by \`${profile.id}\`.`
-        : `Registered tool, not carried by \`${profile.id}\` — it still works if you call it by name.`,
-    "",
-  ];
-
-  if (properties === undefined || properties === null || typeof properties !== "object") {
-    lines.push("## Arguments", "", "This tool takes no arguments.");
-  } else {
-    const entries = Object.entries(properties as Record<string, Record<string, unknown>>);
-    lines.push(
-      "## Arguments",
-      "",
-      entries.length === 0
-        ? "This tool takes no arguments."
-        : entries
-            .map(([key, definition]) => describeArgument(key, definition, required.has(key)))
-            .join("\n"),
-    );
-  }
-
-  // A worked example beats a schema: it shows how this tool is carried, not just
-  // what it accepts.
-  const first = Object.keys((properties ?? {}) as Record<string, unknown>)[0];
-
-  // The example must be USABLE. For a defined tool the name is an alias, so
-  // naming it as the tool would produce a pick that fails — the example has to
-  // start from the registered tool it wraps. This is the one place the surface's
-  // own definition is the subject rather than a detail of it.
-  const definition = profile.tools.derived.find((entry) => entry.as === name);
-  const base = definition?.tool ?? name;
-  const example = definition
-    ? `surface { pick: [{ tool: "${base}", as: "${name}" }] }`
-    : first === undefined
-      ? `surface { pick: [{ tool: "${base}", as: "mine" }] }`
-      : `surface { pick: [{ tool: "${base}", as: "mine", args: { ${first}: ... } }] }`;
-  lines.push(
-    "",
-    "## Carrying it",
-    "",
-    "```",
-    example,
-    "```",
-    "",
-    definition
-      ? `That is how \`${name}\` is defined on this surface: it wraps \`${base}\`. ` +
-          "Omit `as` to redefine the wrapped tool under its own name, and add `defaults`, " +
-          "`constrain`, `output` or `then` to change how it is called or what it returns."
-      : "Omit `as` to redefine the tool under its own name. Add `defaults`, `constrain`, " +
-          "`output` or `then` to shape how it is called, what it returns, or what runs after it.",
-  );
-
-  return lines.join("\n");
-}
-
-/** Every registered tool, marking what the active surface carries. */
-async function renderCatalogue(
-  profile: ModelProfile,
-  core: readonly string[],
-  mutatingArgs: Record<string, string[]>,
-): Promise<string> {
-  const all = await listRegisteredTools();
-  if (all.length === 0) return "The tool catalogue is unavailable in this build.";
-
-  // The carried set comes from the SHAPED list, not from filtering the
-  // registered one. A surface may define tools of its own, and those names exist
-  // nowhere in the registry — filtering by registration silently dropped them
-  // from the catalogue entirely, so a model that had defined a tool was told its
-  // surface carried fewer than it did.
-  const shaped = shapeTools(all, profile, core, mutatingArgs);
-  const carriedNames = new Set(shaped.map((tool) => tool.name));
-  const defined = new Set(
-    shaped.map((tool) => tool.name).filter((name) => !all.some((entry) => entry.name === name)),
-  );
-
-  const render = (tools: ToolListResult["tools"]) =>
-    tools
-      .map((tool) => {
-        // A description may carry several lines (a defined tool says what it
-        // fixed, what it returns, and so on). This is a LIST, so they collapse
-        // into one: a tool whose entry spilled over four lines would break the
-        // scanability the catalogue exists for.
-        const summary = (tool.description ?? "").replace(/\s*\n\s*/g, " ").trim();
-        return (
-          `- \`${tool.name}\`${summariseArgs(tool.inputSchema)}` +
-          `${defined.has(tool.name) ? " **[defined by this surface]**" : ""}` +
-          `${summary ? ` — ${summary}` : ""}`
-        );
-      })
-      .join("\n");
-
-  const inside = shaped;
-  const outside = all.filter((tool) => !carriedNames.has(tool.name));
-
-  const rest = outside.length
-    ? `\n\n## Not carried by \`${profile.id}\` (${outside.length})\n` +
-      "Registered and callable by name; the surface simply does not present them.\n\n" +
-      render(outside)
-    : "";
-
-  const mine = defined.size
-    ? `\n\n${defined.size} of these ${defined.size === 1 ? "is a tool" : "are tools"} this surface ` +
-      "defines for itself, marked above. They exist only while this surface is active."
-    : "";
-
-  return (
-    `# Tool catalogue (${all.length} registered)\n\n` +
-    `\`${profile.id}\` carries ${inside.length} of them.\n\n` +
-    `## Carried by \`${profile.id}\` (${inside.length})\n${render(inside)}${mine}${rest}\n\n` +
-    "Build your working set from these with `surface` and `pick`, then keep it with `save`." +
-    '\n\n`surface` with `detail: "<tool>"` explains one tool in full — every argument, what it accepts, and how to carry it.'
-  );
-}
-
-/** Report the governing surface: why, its guidance, and what it carries. */
-async function renderSurface(
-  profile: ModelProfile,
-  source: string,
-  matched: string | null,
-  clientName: string | null,
-  core: readonly string[],
-  mutatingArgs: Record<string, string[]>,
-): Promise<string> {
-  const why = matched
-    ? `selected by \`${source}\` matching \`${matched}\``
-    : "no signal matched, so the seed surface applies";
-
-  const steps = profile.workflow.length
-    ? `\n\n## Recommended workflow\n${profile.workflow.map((step, i) => `${i + 1}. ${step}`).join("\n")}`
-    : "";
-
-  const all = await listRegisteredTools();
-  const carried = shapeTools(all, profile, core, mutatingArgs).map((tool) => tool.name);
-  const carriedSet = new Set(carried);
-  const rest = all.filter((tool) => !carriedSet.has(tool.name));
-
-  // Carried tools are already in the caller's own tool list, so their schemas
-  // are in hand and repeating them here would be noise.
-  const carries = carried.length
-    ? `\n\n## Carried (${carried.length})\n${carried.map((name) => `\`${name}\``).join(", ")}`
-    : "";
-
-  // The delta is the decision input, so it carries the arguments too. A model
-  // deciding what to pick needs to know what each tool takes, and a list of bare
-  // names forces a second call to find out.
-  const missing = rest.length
-    ? `\n\n## Not carried (${rest.length})\n` +
-      rest
-        .map(
-          (tool) =>
-            `- \`${tool.name}\`${summariseArgs(tool.inputSchema)}` +
-            `${tool.description ? ` — ${tool.description}` : ""}`,
-        )
-        .join("\n") +
-      "\n\nAll of these work if you call them by name. To carry them, `pick` the set you want; " +
-      '`surface` with `detail: "<tool>"` explains one in full.'
-    : "";
-
-  return (
-    `# Surface: ${profile.label} (\`${profile.id}\`)\n\n` +
-    `${profile.description}\n\n` +
-    `Selected because ${why}. Client reported: \`${clientName ?? "unknown"}\`.\n\n` +
-    `## Guidance\n${profile.guidance}${steps}${carries}${missing}\n\n` +
-    "A surface shapes which tools are listed, never which are callable: any tool works by name. " +
-    "Use `surface` with `list` to enumerate, `pick` to compose your own set, or `set` to switch."
-  );
-}
-
-/**
- * Persist the surface the caller built, so a later session can start there.
- *
- * There is no shipped catalogue of surfaces to choose from: the model composes
- * its own with `pick` and this writes that down. The tools come from what was
- * composed, not from a parameter, because a surface is something built and then
- * remembered — not a form to fill in.
- */
-async function saveSurface(
-  id: string,
-  guidance: string | undefined,
-  current: ModelProfile,
-  core: readonly string[],
-  mutatingArgs: Record<string, string[]>,
-): Promise<{ failure: string } | { profile: ModelProfile; replaced: boolean }> {
-  const { profiles, manifest } = await loadSurfaces(PROFILE_ROOT, { fresh: true });
-  const shipped = await shippedIds(PROFILE_ROOT);
-
-  // A shipped surface is the floor: it is what an unrecognised caller lands on,
-  // and replacing it would remove the only way back to the catalogue. The
-  // runtime id is refused for a different reason — the engine uses it for a
-  // surface composed in memory, so a file under that name means two things.
-  if (shipped.has(id)) {
-    return {
-      failure:
-        `\`${id}\` is a shipped surface, so it cannot be replaced. It is what an unrecognised ` +
-        "caller lands on, and removing it would take away the way back. Save under a different id.",
-    };
-  }
-  if (id === manifest.pickedId) {
-    return {
-      failure:
-        `\`${id}\` is reserved for a surface composed in memory this session, so a saved file ` +
-        "under that name would mean two things. Save under a different id.",
-    };
-  }
-
-  const replaced = profiles.has(id);
-
-  const tools = shapeTools(await listRegisteredTools(), current, core, mutatingArgs)
-    .map((tool) => tool.name)
-    .filter((name) => name !== "");
-
-  const parsed = ModelProfileSchema.safeParse({
-    id,
-    label: id,
-    description: `Saved by the model: ${tools.length} tools.`,
-    match: { clientNames: [], models: [] },
-    tools: {
-      include: tools,
-      order: tools,
-      exclude: [],
-      descriptions: current.tools.descriptions,
-      // A derived tool is part of what the caller built, so it is part of what
-      // is written down: recalling the surface must restore the call shapes too.
-      derived: current.tools.derived.filter((entry) => tools.includes(entry.as)),
-    },
-    guidance:
-      guidance ??
-      `You saved this surface yourself and it holds ${tools.length} tools: ${tools.join(", ")}.\n\n` +
-        "It is yours to change. Recompose with `pick` and save again under the same id whenever " +
-        "the task changes shape; nothing here was chosen for you.",
-    workflow: current.workflow,
-  });
-
-  if (!parsed.success) {
-    const issue = parsed.error.issues[0];
-    return { failure: `${issue?.path.join(".") || "profile"}: ${issue?.message}` };
-  }
-
-  try {
-    await saveProfile(PROFILE_ROOT, parsed.data);
-  } catch (error) {
-    return { failure: error instanceof Error ? error.message : String(error) };
-  }
-  return { profile: parsed.data, replaced };
-}
+const harness = createHarness(capabilities, {
+  dir: harnessDir(ENV_PREFIX, PROJECT),
+  open: async (name) => {
+    const found = await openDocumentForHarness(name);
+    return found;
+  },
+  offers: () => offersForHarnessSync(),
+});
 
 server.tool(
-  "surface",
-  "Your tooling, and the only tool that manages it. No arguments reports where you are and lists every tool that exists. `pick` builds your own surface from that list, `save` writes it down for later sessions, `set` recalls one, `list` enumerates.",
+  "run",
+  "Run code against this server's API in a persistent namespace — this is the only tool, and the whole interface.\n\n" +
+    'Write code, not tool calls: `await search_skills({ query: "ept hook" })`, then build on what you find. ' +
+    "Definitions you write persist across calls and across restarts; work does not.\n\n" +
+    "Call with empty code for the manual: the vocabulary, how to open a document, and every capability this " +
+    "server offers. `describe(x)` shows one function's arguments or an object's members.\n\n" +
+    "SECURITY: this executes code with the server's authority. That is what it is, not a mode it can be put " +
+    "into — there is no code-free alternative here, and no enable/disable switch. Run the server sandboxed " +
+    "(container or VM), as you would a shell.",
   {
-    list: z
-      .enum(["tools", "surfaces"])
+    code: z
+      .string()
+      .default("")
+      .describe("Code to run. Empty returns the manual. A trailing expression is returned."),
+    session_id: z
+      .string()
+      .default("")
+      .describe("Working-object scope. Omit for the default session."),
+    strings: z
+      .record(z.string(), z.unknown())
       .optional()
       .describe(
-        "Every registered tool with its arguments and description, or the surfaces you have saved",
+        "Named strings available as S, so long or literal text (payloads, code, blobs) is passed as data instead of being escaped inside code.",
       ),
-    detail: z
-      .string()
-      .optional()
-      .describe(
-        "Explain one tool in full: every argument, what it accepts, and how to carry it. Use this before writing `args`, `constrain` or a chain's `extract`, instead of discovering the shape by being refused.",
-      ),
-    pick: z
-      .array(
-        z.union([
-          z.string(),
-          z.object({
-            tool: z.string().min(1).describe("The registered tool to carry"),
-            as: z
-              .string()
-              .min(1)
-              .optional()
-              .describe(
-                "Name it this instead, to keep the base tool available as well. Defaults to the tool's own name, which redefines it for you.",
-              ),
-            args: z
-              .record(z.string(), z.unknown())
-              .optional()
-              .describe(
-                "Arguments fixed for you. They leave the schema, so you cannot get them wrong when you call, and they win over anything you send.",
-              ),
-            defaults: z
-              .record(z.string(), z.unknown())
-              .optional()
-              .describe(
-                "Values used when you omit an argument. Unlike `args`, the argument stays visible and you can still override it.",
-              ),
-            constrain: z
-              .record(z.string(), z.record(z.string(), z.unknown()))
-              .optional()
-              .describe(
-                "Narrow what an argument may be: enum, minimum, maximum, minLength, maxLength, pattern. Written into the schema and enforced on the call.",
-              ),
-            output: z
-              .strictObject({
-                sections: z.array(z.string().min(1)).optional(),
-                filter: z.string().optional(),
-                reject: z.string().optional(),
-                head: z.number().int().positive().optional(),
-                tail: z.number().int().positive().optional(),
-                maxChars: z.number().int().min(50).optional(),
-              })
-              .optional()
-              .describe(
-                "Keep only part of the answer: named markdown sections, lines matching (or not matching) a pattern, the first or last N lines, or a character cap. The result always says how much was kept, so a shaped answer never reads as the whole truth.",
-              ),
-            then: z
-              .array(
-                z.object({
-                  tool: z
-                    .string()
-                    .min(1)
-                    .describe("The tool to run on what the previous step produced"),
-                  extract: z
-                    .record(z.string(), z.string())
-                    .optional()
-                    .describe(
-                      "Values to pull out of the previous answer, keyed by the argument they fill. Use a capture group to target part of a line. Extraction runs on the raw answer, never on shaped text.",
-                    ),
-                  take: z
-                    .number()
-                    .int()
-                    .min(1)
-                    .max(3)
-                    .optional()
-                    .describe(
-                      "How many matches to run this step for. Two or more fans out, one call per match — this is how 'read the top three' is expressed.",
-                    ),
-                }),
-              )
-              .max(3)
-              .optional()
-              .describe(
-                "Steps to run after this tool, feeding each step the previous answer. Fixed sequence, no branching: a model can debug a sequence it can read, and cannot debug a program it did not write.",
-              ),
-            description: z.string().min(1).optional().describe("Wording to use for it"),
-            argDescriptions: z
-              .record(z.string(), z.string().min(1))
-              .optional()
-              .describe("Wording for the arguments that remain, if you want them said differently"),
-          }),
-        ]),
-      )
-      .optional()
-      .describe(
-        "Build your own surface, for this session. A bare name carries that tool; an object carries it with arguments already set, which is how you define a tool whose call shape you cannot get wrong. This is the path: no working set is chosen for you, here or anywhere else.",
-      ),
-    save: z
-      .string()
-      .regex(PROFILE_ID_PATTERN, PROFILE_ID_MESSAGE)
-      .optional()
-      .describe(
-        "Persist the surface you composed under this id, so later sessions can start there. Must match the id pattern.",
-      ),
-    guidance: z
-      .string()
-      .optional()
-      .describe("What you want to be told each time this saved surface loads"),
-    set: z
-      .string()
-      .optional()
-      .describe("Take a surface you saved earlier, or 'auto' to clear the override"),
   },
-  async ({ list, detail, pick, save, guidance, set }, extra) => {
-    const meta = extra?._meta;
-    const clientName = server.server.getClientVersion()?.name ?? null;
-    const notes: string[] = [];
-
-    // Whether the surface changed in a way a host would need to re-list for. A
-    // composed surface is only reachable if the host learns the list changed;
-    // without this the model composes into a void and keeps seeing the old set.
-    let changed = false;
-
-    // Apply any change before resolving, so the report describes the surface the
-    // caller now has rather than the one they just left.
-    if (pick !== undefined) {
-      // The mutating-argument rule is manifest data, not session state, so it is
-      // read directly: the resolution below describes the surface AFTER this
-      // change, and would not be available yet.
-      const { manifest } = await loadSurfaces(PROFILE_ROOT);
-      const outcome = await pickSurface(pick, manifest.mutatingArgs);
-      if ("failure" in outcome) return err(outcome.failure);
-      setSessionSurface({ kind: "picked", profile: outcome.profile });
-      changed = true;
-      if (outcome.unknown.length) {
-        notes.push(`Ignored unknown tool names: ${outcome.unknown.join(", ")}.`);
-      }
-    } else if (set !== undefined) {
-      const failure = await applySurface(set);
-      if (failure !== null) return err(failure);
-      changed = true;
+  async ({
+    code,
+    session_id,
+    strings,
+  }: {
+    code: string;
+    session_id: string;
+    strings?: Record<string, unknown>;
+  }) => {
+    try {
+      return ok(await harness.run(code, session_id, strings ?? {}));
+    } catch (error) {
+      return err(error instanceof Error ? error.message : String(error));
     }
-
-    const session = getSessionSurface();
-    const resolved = await resolveProfile(PROFILE_ROOT, { meta, clientName, session });
-    const { profile, core } = resolved;
-
-    if (save !== undefined) {
-      const outcome = await saveSurface(save, guidance, profile, core, resolved.mutatingArgs);
-      if ("failure" in outcome) return err(outcome.failure);
-      notes.push(
-        outcome.replaced
-          ? `Replaced the saved surface \`${save}\` with what you are carrying now.`
-          : `Saved as \`${save}\`. Recall it in a later session with \`surface\` and \`set: "${save}"\`.`,
-      );
-    }
-
-    if (detail !== undefined) {
-      return ok(await renderToolDetail(detail, profile, core, resolved.mutatingArgs));
-    }
-    if (list === "surfaces") return ok(await renderSurfaces(profile.id));
-    if (list === "tools") return ok(await renderCatalogue(profile, core, resolved.mutatingArgs));
-
-    const report = await renderSurface(
-      profile,
-      resolved.source,
-      resolved.matched,
-      clientName,
-      core,
-      resolved.mutatingArgs,
-    );
-
-    // Announced last, so a host that re-lists immediately sees the surface this
-    // report just described rather than the one it replaced.
-    if (changed) {
-      try {
-        server.server.sendToolListChanged();
-      } catch {
-        // A transport that cannot carry the notification is not a reason to fail
-        // the call: the surface HAS changed, and the caller's report says so.
-      }
-    }
-
-    return ok(notes.length ? `${notes.join("\n")}\n\n${report}` : report);
   },
 );
-
-const PROFILES_WIRED = installProfileAwareToolList(server);
-const CALLS_WIRED = installProfileAwareCall(server);
 
 // ============================================================
 // MAIN
 // ============================================================
 
 async function main() {
+  // Rebuild the model's tools before serving a single request. A definition it
+  // saved last session is part of its toolkit, not scratch state.
+  const broken = harness.load();
+  if (broken.length > 0) {
+    // Named, not swallowed: a saved definition that no longer loads is the
+    // model's problem to fix, and it cannot fix what it cannot see. Loading
+    // continues either way, so one bad file never stops the server booting.
+    process.stderr.write(
+      `harness: ${broken.length} saved definition(s) failed to load:\n${broken
+        .map((entry) => `  ${entry}`)
+        .join("\n")}\n`,
+    );
+  }
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }

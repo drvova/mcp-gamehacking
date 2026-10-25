@@ -1,121 +1,107 @@
-# Gates: mcp-gamehacking — the model builds its own tooling
+# Gates
 
-Run every gate with `npm run test:gates`, or one with `npm run test:gate -- <name>`.
-The checks live in `tools/checks/check.mjs` and spawn the BUILT server, so run
-`npm run build` first.
+The acceptance ledger for this server. Each gate is a command whose exit status
+is the verdict, and each is verified by **restoring its own defect** — a gate
+that cannot fail proves nothing.
 
-One check reads the skill archive (19 GB) and skips with a loud notice when
-`skills/` is absent, which is the normal case in CI. Set `GATES_REQUIRE_ARCHIVE=1`
-to make an absent archive a failure instead of a skip.
+Run one gate by name, or the whole battery:
 
-OWNS: src/index.ts, src/profiles/**, profiles/**, model-profiles/**, test/**, tools/checks/**, README.md, GATES.md
+```
+node tools/checks/check.mjs single-tool
+npm run test:gates
+```
 
-Scope: A model builds its own tooling. The server ships no base of tools and no catalogue of surfaces to choose from — one seed tool, the whole tool catalogue, and the means to compose, keep and revise a surface from it. Nothing is pre-authored on the model's behalf.
+`GATES_REQUIRE_ARCHIVE=1` turns an absent data directory from a skip into a
+failure, so a green battery never implies coverage it did not have. Every gate
+runs against the **built** server (`dist/index.js`) over stdio JSON-RPC, and
+every gate points the harness at a temp directory — the battery can never read
+or write a real home directory.
 
-- [x] G1: The built server boots, points a model at `surface`, and carries it in the seed
-  CHECK: node tools/checks/check.mjs build-artifact
-  EXPECT: gate-passed:build-artifact
+## The contract
 
-- [x] G2: No pre-authored base ships: exactly one surface exists in the repository, and it is the seed
-  CHECK: node tools/checks/check.mjs no-pre-authored-base
-  EXPECT: gate-passed:no-pre-authored-base
+The server exposes exactly one tool. It runs code in a namespace that persists
+across calls and across restarts, and the project's capabilities are reached
+from inside that namespace rather than advertised as verbs.
 
-- [x] G3: The seed is one tool, and its report shows the whole catalogue so there is something to choose from
-  CHECK: node tools/checks/check.mjs seed-surface
-  EXPECT: gate-passed:seed-surface
+- [x] G1: The advertised set is exactly `{run}` — one tool, unconditionally, and no capability is advertised as a tool
+  CHECK: node tools/checks/check.mjs single-tool
+  EXPECT: gate-passed:single-tool
 
-- [x] G4: A model composes its own surface with `pick`: order honoured, typos reported, an empty pick refused
-  CHECK: node tools/checks/check.mjs compose-pick
-  EXPECT: gate-passed:compose-pick
+- [x] G2: The surface does not vary by caller identity — four different client names all see the same single tool, because adaptation is emergent rather than a per-model switch
+  CHECK: node tools/checks/check.mjs no-per-model-branching
+  EXPECT: gate-passed:no-per-model-branching
 
-- [x] G5: The catalogue publishes every registered tool, agrees with what `tools/list` serves, and an omitted tool stays callable
-  CHECK: node tools/checks/check.mjs catalog-complete
-  EXPECT: gate-passed:catalog-complete
+- [x] G3: There is no enable/disable flag and no code-free mode; the published schema carries `code` and nothing that could turn the tool off, and a call with no arguments at all is accepted
+  CHECK: node tools/checks/check.mjs no-toggle
+  EXPECT: gate-passed:no-toggle
 
-- [x] G6: A surface a model built is saved, survives the process, is recallable by name and by `_meta`, and can be revised
-  CHECK: node tools/checks/check.mjs save-recall
-  EXPECT: gate-passed:save-recall
+## Discovery
 
-- [x] G7: Hostile surface ids are refused and write nothing outside the profiles directory
-  CHECK: node tools/checks/check.mjs id-safety
-  EXPECT: gate-passed:id-safety
+- [x] G4: Empty `code` returns a manual naming the namespace vocabulary and what the project offers
+  CHECK: node tools/checks/check.mjs manual
+  EXPECT: gate-passed:manual
 
-- [x] G8: Every surface carries the core, so none can trap a model, and composing or clearing keeps it
-  CHECK: node tools/checks/check.mjs surface-escape
-  EXPECT: gate-passed:surface-escape
+- [x] G5: `describe` reports a capability's arguments with real types, and an object's public members — `any` where a real type exists is a lie that costs a round trip
+  CHECK: node tools/checks/check.mjs describe-real-types
+  EXPECT: gate-passed:describe-real-types
 
-- [x] G9: Every client lands on the seed, proving detection hands no client a base set
-  CHECK: node tools/checks/check.mjs detect-client
-  EXPECT: gate-passed:detect-client
+## One long-lived namespace
 
-- [x] G10: Omission is presentation only: a tool the seed does not carry still works when called by name
-  CHECK: node tools/checks/check.mjs filter-advisory
-  EXPECT: gate-passed:filter-advisory
+- [x] G6: A helper defined in one call is reusable in the next, redefinition refines it rather than throwing, and variables, functions and classes all persist
+  CHECK: node tools/checks/check.mjs persist-calls
+  EXPECT: gate-passed:persist-calls
 
-- [x] G11: The declared runtime floor is honoured: no source or harness file uses an API newer than engines.node
-  CHECK: node tools/checks/check.mjs engines-honoured
-  EXPECT: gate-passed:engines-honoured
+- [x] G7: A trailing expression and captured output are returned, `result` is honoured, `await` works, `S` carries literal text, `console.log` returns undefined like the real thing, and a failure is reported without losing the namespace
+  CHECK: node tools/checks/check.mjs run-semantics
+  EXPECT: gate-passed:run-semantics
 
-- [x] G12: The design is data, not code: no surface id is hardcoded, and a surface added as a file is live with no rebuild
-  CHECK: node tools/checks/check.mjs data-driven
-  EXPECT: gate-passed:data-driven
+## Persistence on disk
 
-- [x] G13: Existing tool behaviour is unchanged end to end
-  CHECK: node tools/checks/check.mjs tool-smoke
-  EXPECT: gate-passed:tool-smoke
+- [x] G8: A definition made in one process is reloaded and usable in a **fresh process** on the same directory; `forget` removes it live and on disk, and it stays gone after a restart
+  CHECK: node tools/checks/check.mjs persist-restart
+  EXPECT: gate-passed:persist-restart
 
-- [x] G14: This ledger passes its own lint
-  CHECK: node tools/checks/check.mjs ledger
-  EXPECT: gate-passed:ledger
+- [x] G9: Only definitions are persisted — work is never replayed — a declaration that awaits stays call-local, and a name forgotten in the same call is not written back
+  CHECK: node tools/checks/check.mjs definitions-only
+  EXPECT: gate-passed:definitions-only
 
-- [x] G15: A model may define its own tools by binding arguments: the bound argument leaves the schema, the tool works when called with nothing, a caller cannot undo the binding, and it survives a save and a fresh process
-  CHECK: node tools/checks/check.mjs derived-tools
-  EXPECT: gate-passed:derived-tools
+- [x] G10: A broken saved definition cannot stop the server from booting, and it is reported on stderr rather than swallowed — the model cannot fix what it cannot see
+  CHECK: node tools/checks/check.mjs broken-definition-survivable
+  EXPECT: gate-passed:broken-definition-survivable
 
-- [x] G16: A surface cannot lie: a duplicate alias, a stolen tool name and a bogus bound argument are all refused (and all reported at once), and a hand-edited file is held to the same rules with the listing and the call agreeing
-  CHECK: node tools/checks/check.mjs derived-guards
-  EXPECT: gate-passed:derived-guards
+## The capabilities
 
-- [x] G17: An argument can be defaulted (stays, omittable, shown) or constrained (narrows and is enforced), the schema says what will actually happen, and a constraint the tool's own default would break is refused rather than shipped
-  CHECK: node tools/checks/check.mjs derived-narrowing
-  EXPECT: gate-passed:derived-narrowing
+- [x] G11: Every capability the manual lists is reachable from code as a function — read from the manual rather than restated, so the list cannot drift from the server's own
+  CHECK: node tools/checks/check.mjs capabilities-reachable
+  EXPECT: gate-passed:capabilities-reachable
 
-- [x] G18: An answer can be shaped (sections, filter, reject, head, tail, maxChars) and every reduction is REPORTED, a rule that removed nothing stays silent, nothing-matched is stated rather than blank, and a failure is never shaped
-  CHECK: node tools/checks/check.mjs output-shaping
-  EXPECT: gate-passed:output-shaping
+- [x] G12: The pre-existing capabilities still work when driven from code: a search returns real results, the grouped namespace reaches the same functions, a document opens and is workable in-process, and a wrong argument type is named by the capability's own schema
+  CHECK: node tools/checks/check.mjs capability-works
+  EXPECT: gate-passed:capability-works
 
-- [x] G19: A tool can chain others — each step fed values extracted from the previous answer, fan-out with labelled results, the chain declared in the listing, and every failure (a failing step, an unmatched extraction, a short fan-out, a nested chain, a bad pattern) named rather than half-run
-  CHECK: node tools/checks/check.mjs chain
-  EXPECT: gate-passed:chain
+- [x] G13: The skill index is stable under CONCURRENT calls and matches the number of `SKILL.md` directories on disk
+  CHECK: node tools/checks/check.mjs index-stability
+  EXPECT: gate-passed:index-stability
+  NOTE: this gate proves the total is stable and correct. It does NOT prove the
+  single-flight guard is present: removing that guard no longer reproduces the
+  nondeterminism, because the chunked build (which fixed the same bug) prevents
+  it independently. Stated here rather than implied, so the gate is not credited
+  with a defect it cannot catch.
 
-- [x] G20: The catalogue publishes each tool's arguments (required vs optional, types, defaults), `detail` explains one tool in full with a worked example, and the published shape is buildable rather than describing a tool that does not exist
-  CHECK: node tools/checks/check.mjs catalog-args
-  EXPECT: gate-passed:catalog-args
+## What each gate catches
 
-- [x] G21: The chain runner holds its own contract: extraction reads the RAW answer at every step position, a step cannot fill an argument that changes session state (by extraction or on a defined alias), a refusal leaves the surface untouched, and reading the surface tool as a step still works
-  CHECK: node tools/checks/check.mjs chain-integrity
-  EXPECT: gate-passed:chain-integrity
-
-- [x] G22: The floor cannot be removed — a shipped surface cannot be replaced by `save` or by a hand-edited file, the engine's runtime id is reserved, a refused replacement is reported rather than swallowed, and a legitimate id still saves
-  CHECK: node tools/checks/check.mjs floor-holds
-  EXPECT: gate-passed:floor-holds
-
-- [x] G23: The catalogue agrees with the listing — a tool the surface defined is shown and marked, the count matches, one line per entry, and a surface that defines nothing claims nothing
-  CHECK: node tools/checks/check.mjs catalog-agrees
-  EXPECT: gate-passed:catalog-agrees
-
-- [x] G24: A mistyped key in a constraint or an output rule is refused and named, rather than accepted and silently dropped, and a correctly written rule still works
-  CHECK: node tools/checks/check.mjs typo-refused
-  EXPECT: gate-passed:typo-refused
-
-- [x] G25: `detail` agrees with the catalogue — a tool the surface defined is explained and its example starts from the tool it wraps, an uncarried registered tool stays explainable (a model inspects one before picking it), and a name that does not exist names what the surface carries
-  CHECK: node tools/checks/check.mjs detail-agrees
-  EXPECT: gate-passed:detail-agrees
-
-- [x] G26: Every view of a surface agrees — the listing, the catalogue, the surface report and the detail view name the same carried set, and the listing declares the same chain, shaping and fixed arguments the detail view reports
-  CHECK: node tools/checks/check.mjs views-agree
-  EXPECT: gate-passed:views-agree
-
-- [x] G27: The server announces a changed tool list — `tools.listChanged` is declared, the notification is sent on a compose and a clear, never on a read, and never when the change was refused
-  CHECK: node tools/checks/check.mjs list-changed
-  EXPECT: gate-passed:list-changed
+| Gate | Restore this defect | Failure it produces |
+|---|---|---|
+| G1 | register any capability as a tool | `expected exactly one tool, got run, search_skills` |
+| G2 | branch the surface on `clientInfo.name` | `the surface differs by client: run \| run,surface` |
+| G3 | add an `enable` flag to the schema | `the tool publishes an enable/disable-style flag` |
+| G4 | return an empty string for empty code | `the manual does not name describe` |
+| G5 | report the zod wrapper instead of the inner type | `describe reported any for a real type` |
+| G6 | run definitions inside the async wrapper | `a helper did not persist` |
+| G7 | return `push()`'s result from `console.log` | `console.log leaked a value: "only"` |
+| G8 | never call `load()` at startup | `a definition did not survive a restart` |
+| G9 | save every statement, or save after work | `unexpected files saved: alpha.js, beta.js, hits.js` |
+| G10 | load definitions without a per-file try/except | `the server did not boot cleanly` |
+| G11 | seed only a subset of the capabilities | `missing: compare_projects, ...` |
+| G12 | skip the capability's schema validation | `bad arguments were not explained` |
+| G13 | make the index total depend on how many calls are in flight | `the index total varied: ...` (not reproducible today — see the note) |

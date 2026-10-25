@@ -104,350 +104,92 @@ MCP (Model Context Protocol) server for game hacking & reverse engineering. A st
 
 ---
 
-## Tools (28 total)
+## The tool: `run`
 
-### Workflow Tools
+**One tool. It runs code.**
 
-| Tool                 | Description                                                |
-| -------------------- | ---------------------------------------------------------- |
-| `research_technique` | End-to-end technique research with scored keyword ranking  |
-| `analyze_project`    | Full project analysis (SKILL.md + source code)             |
-| `get_agent_briefing` | Load agent definition with available subagents and plugins |
-
-### Skill Tools
-
-| Tool            | Description                                                    |
-| --------------- | -------------------------------------------------------------- |
-| `list_skills`   | List/filter skills by name or type                             |
-| `read_skill`    | Read a skill SKILL.md                                          |
-| `read_source`   | Read source code with pagination (50KB chunks)                 |
-| `search_skills` | Multi-keyword scored search across names, descriptions, topics |
-| `skill_stats`   | Library statistics                                             |
-
-### Component Tools
-
-| Tool                               | Description                          |
-| ---------------------------------- | ------------------------------------ |
-| `list_agents` / `read_agent`       | Browse and read agent definitions    |
-| `list_subagents` / `read_subagent` | Browse and read subagent definitions |
-| `list_plugins` / `read_plugin`     | Browse and read plugin definitions   |
-| `list_prompts` / `read_prompt`     | Browse and read prompt templates     |
-
-### Surface Tool
-
-| Tool      | Description                                       |
-| --------- | ------------------------------------------------- |
-| `surface` | Report, compose, keep and recall your own tooling |
-
-## Tooling: the model builds its own
-
-Models do not work equally well on the same tools. A model that reasons well
-over a large surface and a small local model that needs four unambiguous
-single-argument tools are not served by the same list — so this server does not
-impose one. **There is no base set, and no catalogue of surfaces to choose
-from.** You get one tool, the whole tool catalogue, and the means to build a
-surface from it.
-
-```
-surface          the only tool you begin with
+```json
+run(code = "", session_id = "", strings = null) -> str
 ```
 
-Called with no arguments it reports where you are and lists **every registered
-tool with its arguments** — required and optional, types, defaults — plus the
-delta between what you carry and what you do not. A model deciding what to pick
-needs to know what each tool takes; a list of bare names forces a second call
-before it can even decide.
+There is no catalog of per-capability verbs, and no `action=` dispatcher — the
+parameter is _code_. You discover what is here, write helpers, and those helpers
+are still there next call and after a restart. The harness adapts to the model
+and the task, instead of every model having to work the same hand-picked menu.
+
+### What a session looks like
 
 ```
-- `read_agent` (name: string) — Read a agent's full definition and system prompt.
-- `search_skills` (query: string, has_source?: boolean, limit?: number=20) — Scored keyword search...
-- `skill_stats` (no arguments) — Library statistics from the in-memory index.
-```
+> run("")                                    # the manual: vocabulary + every capability
 
-`surface` with `detail: "<tool>"` explains one tool completely — every argument
-with what it accepts, and a worked example of carrying it:
+> run("await search_skills({ query: 'EPT hook' })")
+Found 12 relevant skills (showing top 10):
+- ags-budget-ept (score:7) -- BudgetEPT: stealthy inline EPT-like hooks...
 
-```
-surface { detail: "read_agent" }
-```
+> run("const brief = async (name) => (await read_skill({ name })).split('\\n').slice(0, 40).join('\\n');")
+[function brief]
 
-Then:
-
-```
-surface { pick: [...] }               build your own surface, this session
-surface { save: "id" }                keep it, so later sessions can start there
-surface { set: "id" }                 recall a surface you saved
-surface { list: "tools" }             the catalogue again
-surface { list: "surfaces" }          what you have saved
-```
-
-An entry may also **bind arguments**, which is how a model defines a tool whose
-call shape it cannot get wrong:
-
-```
-surface { pick: [
-  "search_skills",
-  { tool: "read_source", as: "read_kdmapper", args: { name: "ags-kdmapper-1909" } }
-] }
-```
-
-`read_kdmapper` is listed with `name` **gone from its schema** — not merely
-pre-filled — so it is called with no arguments at all. A bound argument leaves
-the schema because an argument the caller can still see is one the caller can
-still get wrong, and removing the decision is the whole point. The model can also
-re-word the arguments that remain with `argDescriptions`, and re-word the tool
-itself with `description`.
-
-Bound arguments win over anything the caller sends: they left the schema, so a
-caller sending one is reaching past what it was shown. A partial binding keeps
-everything it did not bind — `args: { limit: 5 }` on a three-argument tool leaves
-a two-argument tool.
-
-### Four things you can do to an argument
-
-They are deliberately different, and the difference is the point:
-
-|                   | what happens                      | why                                |
-| ----------------- | --------------------------------- | ---------------------------------- |
-| `args`            | leaves the schema, always wins    | the decision is gone               |
-| `defaults`        | stays, omittable, shows the value | _"this, unless you say otherwise"_ |
-| `constrain`       | stays, narrows, **enforced**      | the wrong value cannot get through |
-| `argDescriptions` | stays, re-worded                  | said the way you need to hear it   |
-
-```
-surface { pick: [
-  { tool: "search_skills", as: "find",
-    defaults:  { limit: 3 },
-    constrain: { limit: { minimum: 1, maximum: 3 } },
-    argDescriptions: { query: "What you are looking for." } }
-] }
-```
-
-A constraint is **enforced, not advertised**: a schema that lists an enum while
-the server accepts anything is a lie, so a value outside the range is refused and
-the refusal names what was allowed. Constraints cover `enum`, `minimum`,
-`maximum`, `minLength`, `maxLength` and `pattern`.
-
-Two contradictions are refused rather than accepted as no-ops, because either
-would leave the surface saying something it does not do:
-
-- a `defaults` or `constrain` on an argument you also **fixed** — the fixed value
-  wins, so the other is inert;
-- a constraint the tool's **own default** would break. `search_skills` defaults
-  `limit` to 20, so narrowing the maximum to 3 without also setting a `defaults`
-  that fits is refused, and the refusal says which default it conflicts with.
-
-Omit `as` and the tool is redefined under its own name: _"`read_source`, but for
-me `name` is already set."_
-
-`pick` is the path. Nothing is chosen for you — not here, and not anywhere else.
-A composed surface is session-scoped and writes nothing to disk until you `save`
-it, so recomposing when the task changes shape costs one call. Re-saving an id
-you already own **revises** it: your tooling has to be able to change as the work
-does.
-
-**Nothing is withheld while you decide.** Every registered tool stays callable by
-name even when your surface does not carry it, so you can finish a task first and
-shape your surface afterwards. `surface` always shows the delta.
-
-### Chaining tools
-
-A chain is a declaration, not a program. Fixed sequence, no branching, at most
-three steps, each running at most three times:
-
-```
-surface { pick: [
-  { tool: "search_skills", as: "find_and_read",
-    args: { limit: 3 },
-    then: [{ tool: "read_skill", extract: { name: "- \\*\\*([^*]+)\\*\\*" } }],
-    output: { head: 6 } }
-] }
-```
-
-Each step receives values pulled out of the previous answer, keyed by the
-argument they fill. A pattern with a capture group targets part of a line; one
-without yields the whole match.
-
-```
-[chain] search_skills → read_skill
-[2] read_skill(name=ags-eddeeh-kdmapper) → 1072 chars
-
-# ags-eddeeh-kdmapper
+> run("await brief('ags-kdmapper')")          # still defined, one call later
+# kdmapper
 ...
 ```
 
-**The trace is not decoration.** It says which step ran, with what, and how much
-came back — which is the difference between a chain a model can debug and one it
-cannot see into. It names the tool that actually ran, so a step calling a tool the
-surface defined never hides behind its alias.
+### Everything is reached from inside the namespace
 
-`take: 2` fans out — one call per match, each result labelled, because a content
-rule that stripped the labels would leave several results with no way to tell
-which is which.
+| Seed                      | What it is                                                                 |
+| ------------------------- | -------------------------------------------------------------------------- |
+| the capabilities          | every project function, as an async call: `await search_skills({...})`     |
+| `kb`                      | the same functions grouped: `kb.skills.search(...)`, `kb.agents.read(...)` |
+| `open(name)`              | open a skill (`agent/name` for a component) to work on it in-process       |
+| `describe(x)`             | one function's arguments, or an object's public members                    |
+| `S`                       | the `strings` dict you passed, so long text is data rather than escaped    |
+| `kept()` / `forget(name)` | what you have defined, and how to delete one                               |
+| `man()`                   | the manual again                                                           |
 
-Five things are refused rather than half-run, and each says which step and why:
+### Persistence
 
-| what went wrong                         | what happens                                              |
-| --------------------------------------- | --------------------------------------------------------- |
-| a step returns an error                 | the chain stops, that step is named, its error shown      |
-| an extraction matches nothing           | the chain stops; the **pattern and the answer** are shown |
-| fewer matched than `take`               | it runs what it has and **says so**                       |
-| a chain inside a chain                  | refused: nesting makes a sequence something to work out   |
-| a step naming nothing, or a bad pattern | refused before anything runs, all faults at once          |
+- **Across calls.** A definition (`function`, `class`, `const`, `let`, `var`) is
+  saved and reloaded, so a helper is written once. Refine one by defining it
+  again — redefinition is fine.
+- **Across restarts.** Each definition is written to
+  `$GAMEHACKING_HARNESS_DIR` (default `~/.gamehacking/harness`), one file per
+  bound name, and loaded at startup. Each file loads in its own try/except: a
+  broken saved definition cannot stop the server from booting, and it is reported
+  on stderr rather than swallowed.
+- **Only definitions, never work.** A side-effecting statement is not persisted,
+  so a restart rebuilds your tools without replaying your work. A declaration
+  that awaits (`const hits = await search(...)`) is call-local for the same
+  reason — persisting it would mean re-running its initializer.
+- `forget("name")` removes one, live and on disk.
 
-The last two matter most. A chain that half-runs and says nothing useful is worse
-than one that never started, and silently reading one of the three things you
-asked for is the kind of lie this design keeps refusing to tell.
+### Security: a deployment fact, not a toggle
 
-Two rules that make a chain predictable:
+**This executes code with the server's authority.** That is what the tool is,
+not a mode it can be put into, so there is no enable/disable flag and no
+"default" to reason about — a flag would reframe the whole design as an optional
+feature.
 
-- **Extraction reads the raw answer, at every step.** `output` shaping is for the
-  reader; a rule meant for eyes must not decide what flows between steps. (It
-  once read raw for step 2 and shaped for step 3 — the same chain behaving
-  differently by position.)
-- **An extraction that matched more than 50 values says so.** The cap exists so a
-  broad pattern cannot pull tens of thousands of values, but a model that cannot
-  tell fifty from seventy-five reasons about the wrong set, so reaching the cap
-  is reported in the trace and a narrow pattern stays silent.
-- **A step may not fill an argument that changes session state.** Otherwise a
-  chain could reconfigure the surface it is running under, and change what the
-  remaining steps resolve against. Reading the surface tool as a step is fine;
-  `pick`, `save` and `set` are not. Which arguments those are is declared in
-  `profiles/manifest.json`, so a second mutating tool costs a line of data.
+**Run the server sandboxed — a container or a VM — as you would a shell.**
 
-### Shaping the answer
+### Why one tool instead of twenty-eight
 
-The mirror of shaping the call. A tool that returns a thousand lines is unusable;
-the same tool returning fifty is not.
+Every target and version supports a different subset of capabilities, and models
+perform differently with different tool sets. A hand-picked menu biases the
+system toward some models and some targets, and every new capability needs new
+hand-wired glue. One tool that runs code against a live API inverts that: the
+model composes what it needs, and its toolkit accretes in its own harness
+directory rather than in this repository.
 
-```
-surface { pick: [
-  { tool: "read_agent", as: "who",
-    output: { sections: ["Workflow"], head: 20 } }
-] }
-```
+The capabilities are all still here and all still work — they are simply
+**reached from code** instead of advertised as verbs. Adding one is still one
+function.
 
-| rule            | keeps                                                  |
-| --------------- | ------------------------------------------------------ |
-| `sections`      | only these markdown sections, heading included         |
-| `filter`        | only lines matching a pattern                          |
-| `reject`        | everything except lines matching a pattern             |
-| `head` / `tail` | the first or last N lines                              |
-| `maxChars`      | a character cap, ending on a line break where possible |
+### Tests isolate state
 
-Rules apply in a fixed order — sections, line selection, line window, character
-cap — so a rule set means one thing rather than depending on the order it was
-written in.
-
-**Every reduction is reported.** This is the whole point of the feature, not a
-detail of it:
-
-```
-## Workflow
-
-1. Receive a task or question within the domain
-...
-
-[shaped: 14 of 66 lines — sections: Core Capabilities, Workflow]
-```
-
-A shaped answer that hid its own shaping would be read as the whole truth, and a
-model acting on a truncated list as if it were complete is worse off than one
-that got no answer at all. Three consequences of that rule:
-
-- a rule that removed **nothing** adds no note, so the note never cries wolf;
-- a rule that removed **everything** says so (`nothing matched — 0 of 66 lines`)
-  instead of returning a blank, which would read as "the tool returned nothing";
-- a **failure is never shaped.** The reason for a failure is the one thing a
-  caller must not lose, so errors pass through untouched however destructive the
-  rules are.
-
-`head` with `tail` is refused as ambiguous, and a pattern that will not compile is
-refused by name — a rule that cannot do what it says is worse than no rule.
-
-### Reaching a host that reads the list once
-
-A host that reads `tools/list` at session start only ever sees the seed, so a
-surface composed later would be unreachable — the model composes into a void.
-
-MCP's standard answer applies, and this server implements it:
-
-- `tools.listChanged` is declared in the initialize response, so a conforming
-  host knows to re-list;
-- `notifications/tools/list_changed` is sent whenever the surface actually
-  changes — on `pick`, on `set`, on `save`;
-- and **never** on a read, and **never** when a change was refused. A signal that
-  fires when nothing changed is one a host learns to ignore.
-
-The notification goes out after the report is built, so a host that re-lists
-immediately fetches the surface the report just described.
-
-A host that ignores the notification still works: the report says what changed,
-and every registered tool stays callable by name. The announcement makes the
-composed surface _reachable_; it is not what makes it _work_.
-
-### What cannot be changed
-
-Three guards protect the floor, each because removing it takes away the way back:
-
-| guard                                | why                                                                                                         |
-| ------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
-| a shipped surface cannot be replaced | it is what an unrecognised caller lands on; replacing the seed would leave no way to discover the catalogue |
-| the runtime id is reserved           | the engine uses it for a surface composed in memory, so a file under that name would mean two things        |
-| a mistyped rule is refused           | `minimun` used to be accepted and ignored, leaving the model reasoning as if a range were in force          |
-
-The first is enforced at **both** layers — `save` refuses it with a reason, and
-the loader refuses an authored file whose id collides with a shipped one, because
-a file written straight to disk never passes through `save`. A refused
-replacement is reported in `list: "surfaces"` rather than swallowed: silent
-rejection would leave a model wondering why nothing changed.
-
-### What the server does ship
-
-Exactly one surface, and it is not a choice:
-
-```
-profiles/manifest.json     seed surface, the core every surface must carry
-profiles/default.json      the seed itself: one tool
-```
-
-Any second file here would be the server guessing what some model needs, which is
-the thing this design exists to avoid. The gate `no-pre-authored-base` fails if
-one appears.
-
-### The surface core
-
-`surface` is carried by **every** surface, whatever else it drops. A surface may
-choose to be narrow; it may not choose to be _inescapable_ — without this one
-tool a model could not see that a surface governs it, could not discover the
-catalogue, and could not leave. The core is declared in `manifest.json` and
-enforced in the shaper, which every profile passes through: shipped, authored, or
-edited by hand on disk.
-
-### The design is data
-
-No tool name, surface id, or list appears in the engine. The shape of the system
-lives in files, read at runtime:
-
-```
-profiles/manifest.json     { seed, surfaceCore, pickedId }
-profiles/<id>.json         a surface shipped with the server
-model-profiles/<id>.json   surfaces you built and saved
-```
-
-Both directories go through the same schema, so a shipped surface and a saved one
-are the same kind of thing: one is simply already on disk. Adding, reordering or
-rewording a surface is an edit to data — no rebuild, no source change. The
-`data-driven` gate enforces that: it fails if a surface id appears in the source,
-and proves a drop-in file takes effect with the built artifact byte-identical.
-
-### Resolution
-
-A request's surface is chosen by the first of: `_meta.profile`, `_meta.model`, the
-session override from `set`, `MCP_MODEL_PROFILE`/`MCP_MODEL`, a client-name match,
-or the seed. With nothing pre-authored, an unrecognised caller always lands on the
-seed — and `detect-client` is the gate that proves no client is quietly handed a
-base set.
+Every test and every gate points `GAMEHACKING_HARNESS_DIR` at a temp directory.
+Isolation is the default in the test helper rather than something each test has
+to remember, so a test cannot write into a real home directory by forgetting to
+ask.
 
 ## Installation
 
@@ -513,63 +255,75 @@ Add to `.cursor/mcp.json`:
 
 ## Usage Examples
 
+Every example below is one call to `run`.
+
 ### Research a technique
 
 ```
-> research_technique("EPT hook")
+> run("await research_technique({ technique: 'EPT hook' })")
 
 Found 12 relevant skills (showing top 10):
 - ags-budget-ept (score:7) -- BudgetEPT: stealthy inline EPT-like hooks...
 - ags-hyper-deceit (score:6) -- HyperDeceit: HvcallCodeVa hook framework...
 ```
 
-### Analyze a project
+### Build a tool once, use it all session
 
 ```
-> analyze_project("ags-kdmapper", focus="architecture")
+> run("const sweep = async (q) => (await search_skills({ query: q })).split('\\n').filter((l) => /driver|kernel/i.test(l));")
 
-# kdmapper
-Most popular kernel driver mapper using iqvw64e.sys...
-## Source Code (first 300 lines)
-...
+> run("await sweep('BYOVD')")
+- ags-kdmapper (score:6): iqvw64e.sys based mapper...
 ```
 
-### Search skills
+### Work on a project's source in-process
 
 ```
-> search_skills("valorant vanguard bypass")
+> run("const d = await open('ags-kdmapper'); d.headings().slice(0, 5)")
 
-Found 23 skills:
-- vgk-internals-callbacks (score:7)
-- ags-valorant-external (score:4)
+[ "# kdmapper", "## Description", "## Source Tree", "## Key Files", "## Usage" ]
+
+> run("d.grep(/iqvw64e/).length")
+7
 ```
 
-### Agent briefing
+### Cross-reference offsets across the archive
 
 ```
-> get_agent_briefing("exploit-developer")
-
-# Agent: exploit-developer
-Kernel exploit and driver development agent...
-## Available Subagents: offset-finder, detection-assessor
-## Available Plugins: game-offset-db, technique-finder
+> run("await compare_projects({ name_a: 'ags-kdmapper', name_b: 'ags-kdmapper-rs' })")
 ```
 
----
+### Ask what something does before calling it
+
+```
+> run("describe(analyze_project)")
+
+analyze_project({name, focus, source_lines})
+  Analyze a project's source code with optional focus areas.
+  - name: string — Project name (skill folder name)
+  - focus: string — optional — Focus area
+  - source_lines: number — optional — default 300
+```
+
+### Use a helper across sessions
+
+```
+# session 1
+> run("const brief = async (n) => (await read_skill({ name: n })).slice(0, 2000);")
+
+# session 2 — a fresh process, same harness directory
+> run("await brief('hooking-vmt')")
+```
 
 ## Project Structure
 
 ```
 mcp-gamehacking/
-+-- src/index.ts              # MCP server (29 tools)
-+-- src/profiles/             # Per-model profile layer
-+|   +-- types.ts              #   profile schema and id rules
-+|   +-- builtin.ts            #   built-in profiles
-+|   +-- registry.ts           #   load, validate, persist
-+|   +-- resolve.ts            #   resolution order and tool shaping
-+-- profiles/                  # SHIPPED: manifest.json + the seed (data)
-+-- model-profiles/            # Surfaces the model built and saved (data)
++-- src/index.ts              # MCP server: capabilities + the one `run` tool
++-- src/harness.ts            # The code harness: namespace, persistence, describe
 +-- test/                      # Rstest suites
++|   +-- harness.test.ts       #   the tool's contract
++|   +-- server.test.ts        #   capabilities, driven from code
 +-- dist/                      # Compiled JS
 +-- skills/                    # 4,161 skill directories
 |   +-- <hand-written>/        #   177 curated deep-dive skills
@@ -609,7 +363,7 @@ mcp-gamehacking/
 |   +-- generate/     (10)     +-- migrate/      (10)
 |   +-- optimize/     (10)     +-- setup/        (10)
 +-- tools/checks/check.mjs      # Gate battery (see GATES.md)
-+-- GATES.md                    # Acceptance ledger for the profile layer
++-- GATES.md                    # Acceptance ledger for the code harness
 +-- package.json
 +-- tsconfig.json
 ```
@@ -632,10 +386,13 @@ and `npm run test:gate -- <name>` runs one on its own.
 The gate battery spawns the built server and drives it over stdio JSON-RPC, so
 it exercises the shipped artifact rather than the sources.
 
-Three checks and five tests compare against real data in `skills/`. That archive
-is 19 GB, so CI checks the repository out without it; those cases detect the
-absence and **skip with a loud notice** rather than asserting against nothing.
-Set `GATES_REQUIRE_ARCHIVE=1` to make an absent archive a failure instead.
+Some gates and tests compare against real data in `skills/`. That archive is
+large, so CI checks the repository out without it; those cases detect the absence
+and **skip with a loud notice** rather than asserting against nothing. Set
+`GATES_REQUIRE_ARCHIVE=1` to make an absent archive a failure instead.
+
+Every gate runs the harness in a temp directory, so the battery never reads or
+writes a real home directory.
 
 ---
 

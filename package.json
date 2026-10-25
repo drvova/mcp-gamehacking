@@ -1,7 +1,7 @@
 {
   "name": "mcp-gamehacking",
   "version": "4.0.0",
-  "description": "MCP server for game hacking & reverse engineering \u2014 4,100+ skills, 75 agents, 161 subagents, 114 plugins, 148 prompts, full-text grep, offset cross-ref, similarity search, offset export, function finder",
+  "description": "MCP server for game hacking & reverse engineering — 4,100+ skills, 75 agents, 161 subagents, 114 plugins, 148 prompts, full-text grep, offset cross-ref, similarity search, offset export, function finder",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
@@ -45,6 +45,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
+    "acorn": "^8.19.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {

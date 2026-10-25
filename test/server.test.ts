@@ -8,14 +8,22 @@ import {
   SERVER,
   SKILLS_DIR,
   callServer,
+  listTools,
   reportSkipped,
   requireArchive,
   textOf,
   toolCall,
+  toolNames,
 } from "./helpers/mcp.js";
 
-/** Every tool the server must expose. */
-const EXPECTED_TOOLS = [
+/**
+ * Every capability the server can perform.
+ *
+ * These are NOT advertised as tools. They are reached from code inside `run`,
+ * which is the only tool — so this list is used to prove they are reachable,
+ * not that they are listed.
+ */
+const EXPECTED_CAPABILITIES = [
   "analyze_project",
   "compare_projects",
   "export_offsets",
@@ -73,22 +81,42 @@ describe("MCP server contract", () => {
     const info = InitializeResult.parse(responses.get(0)?.result);
 
     expect(info.instructions).toBeTruthy();
-    expect(info.instructions).toContain("`surface`");
+    // The instructions have to say what the one tool is and that it runs code
+    // with the server's authority, because that fact is not discoverable from
+    // the schema alone.
+    expect(info.instructions).toContain("`run`");
+    expect(info.instructions).toMatch(/code/);
+    expect(info.instructions).toMatch(/sandbox/i);
   });
 
-  it("registers every pre-existing tool", async () => {
-    // The default listing is a seed now, so presence is asserted against the
-    // catalogue rather than the presented surface: a tool may be unlisted and
-    // still be registered and callable by name.
-    const catalog = textOf((await callServer([toolCall(1, "surface", { list: "tools" })])).get(1));
-    for (const tool of EXPECTED_TOOLS) expect(catalog).toContain(`\`${tool}\``);
+  it("advertises one tool, and no capability as a tool", async () => {
+    const responses = await callServer([listTools(1)]);
+    const names = toolNames(responses.get(1));
+
+    expect(names).toEqual(["run"]);
+    for (const capability of EXPECTED_CAPABILITIES) expect(names).not.toContain(capability);
+  });
+
+  it("keeps every pre-existing capability reachable from code", async () => {
+    // The contract: leave the capability functions defined and working, just do
+    // not register them as tools. Reached through the harness, all of them are
+    // still there.
+    const responses = await callServer([
+      toolCall(1, "run", {
+        code: `const names = [${EXPECTED_CAPABILITIES.map((c) => `"${c}"`).join(", ")}];
+const missing = names.filter((n) => typeof globalThis[n] !== "function");
+missing.length === 0 ? "all reachable" : "missing: " + missing.join(", ")`,
+      }),
+    ]);
+
+    expect(textOf(responses.get(1))).toBe("all reachable");
   });
 });
 
 describe("skill index", () => {
   it("indexes every SKILL.md on disk", async () => {
     if (!requireArchive("indexes every SKILL.md on disk")) return;
-    const responses = await callServer([toolCall(1, "skill_stats")]);
+    const responses = await callServer([toolCall(1, "run", { code: "await skill_stats()" })]);
     const total = Number(textOf(responses.get(1)).match(/\*\*Total:\*\*\s*(\d+)/)?.[1]);
 
     // Ground truth: an indexed skill is a directory holding a SKILL.md.
@@ -105,10 +133,10 @@ describe("skill index", () => {
     // single-flight guard previously produced 0, 4159 and 4030 from one process.
     if (!requireArchive("returns a stable total under concurrent calls")) return;
     const responses = await callServer([
-      toolCall(1, "skill_stats"),
-      toolCall(2, "skill_stats"),
-      toolCall(3, "skill_stats"),
-      toolCall(4, "skill_stats"),
+      toolCall(1, "run", { code: "await skill_stats()" }),
+      toolCall(2, "run", { code: "await skill_stats()" }),
+      toolCall(3, "run", { code: "await skill_stats()" }),
+      toolCall(4, "run", { code: "await skill_stats()" }),
     ]);
 
     const totals = [1, 2, 3, 4].map(
@@ -123,8 +151,8 @@ describe("skill index", () => {
     // `type` under `metadata:`, so this filter used to return zero rows.
     if (!requireArchive("parses metadata.type so type filters match")) return;
     const responses = await callServer([
-      toolCall(1, "list_skills", { type: "reference", limit: 1 }),
-      toolCall(2, "skill_stats"),
+      toolCall(1, "run", { code: "await list_skills({ type: 'reference', limit: 1 })" }),
+      toolCall(2, "run", { code: "await skill_stats()" }),
     ]);
 
     expect(textOf(responses.get(1))).toMatch(/^Found [1-9]\d* skills/);
@@ -139,7 +167,13 @@ describe("get_file_tree", () => {
     if (!requireArchive("reads the drawn tree instead of markdown bullets")) return;
     const project = "ags-kdmapper-1909";
     const output = textOf(
-      (await callServer([toolCall(1, "get_file_tree", { name: project, max_entries: 10 })])).get(1),
+      (
+        await callServer([
+          toolCall(1, "run", {
+            code: `await get_file_tree({ name: "${project}", max_entries: 10 })`,
+          }),
+        ])
+      ).get(1),
     );
 
     expect(output).toContain(`# File Tree: ${project}`);

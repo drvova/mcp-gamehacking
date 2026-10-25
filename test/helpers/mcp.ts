@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { existsSync, readdirSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 
@@ -32,9 +34,17 @@ function deferred<T>() {
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 export const ROOT = resolve(HERE, "../..");
+
+/**
+ * A temp harness directory, created once per test process.
+ *
+ * Every spawned server gets this unless a test overrides it. Isolation is the
+ * DEFAULT rather than something each test must remember, so a test cannot write
+ * into a real home directory by forgetting to ask for a temp one.
+ */
+export const TEST_HARNESS_DIR = mkdtempSync(join(tmpdir(), "gamehacking-harness-helper-"));
 export const SERVER = resolve(ROOT, "dist", "index.js");
 export const SKILLS_DIR = resolve(ROOT, "skills");
-export const PROFILES_DIR = resolve(ROOT, "model-profiles");
 
 /**
  * Whether the skill archive is present.
@@ -105,7 +115,15 @@ export const InitializeResult = z.object({
 });
 
 export const ToolsListResult = z.object({
-  tools: z.array(z.object({ name: z.string() })),
+  tools: z.array(
+    z.object({
+      name: z.string(),
+      /** Published argument schema; tests read it to assert the contract. */
+      inputSchema: z
+        .object({ properties: z.record(z.string(), z.unknown()).optional() })
+        .optional(),
+    }),
+  ),
 });
 
 export const CallToolResult = z.object({
@@ -118,6 +136,8 @@ export type CallOptions = {
   /** Value reported as `clientInfo.name` at initialize. */
   clientName?: string;
   timeoutMs?: number;
+  /** Extra environment for the spawned server. Tests use this to isolate state. */
+  env?: Record<string, string>;
 };
 
 /**
@@ -131,11 +151,16 @@ export function callServer(
   requests: object[],
   options: CallOptions = {},
 ): Promise<Map<number, Frame>> {
-  const { clientName = "rstest", timeoutMs = 120_000 } = options;
+  const { clientName = "rstest", timeoutMs = 120_000, env } = options;
   const { promise, resolve: settle, reject } = deferred<Map<number, Frame>>();
 
   const child = spawn(process.execPath, [SERVER], {
     stdio: ["pipe", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      GAMEHACKING_HARNESS_DIR: TEST_HARNESS_DIR,
+      ...env,
+    },
     // Kills a wedged child so a hung server fails the test instead of stalling
     // the run. This is a process guard, not a pacing delay.
     signal: AbortSignal.timeout(timeoutMs),
@@ -220,13 +245,6 @@ export function toolNames(frame: Frame | undefined): string[] {
   return parsed.tools.map((tool) => tool.name);
 }
 
-/** Read the profile id out of a `surface` report. */
-export function profileIdOf(frame: Frame | undefined): string {
-  const match = textOf(frame).match(/^# Surface: .*\(`([a-z0-9-]+)`\)/m);
-  if (!match) throw new Error(`no profile id in: ${textOf(frame).slice(0, 160)}`);
-  return match[1];
-}
-
 const ErrorFlag = z.object({ isError: z.boolean().optional() });
 
 /**
@@ -257,10 +275,15 @@ export type Session = {
  * the next, and this session models that.
  */
 export async function openSession(options: CallOptions = {}): Promise<Session> {
-  const { clientName = "rstest", timeoutMs = 120_000 } = options;
+  const { clientName = "rstest", timeoutMs = 120_000, env } = options;
 
   const child = spawn(process.execPath, [SERVER], {
     stdio: ["pipe", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      GAMEHACKING_HARNESS_DIR: TEST_HARNESS_DIR,
+      ...env,
+    },
     signal: AbortSignal.timeout(timeoutMs),
   });
 
