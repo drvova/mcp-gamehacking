@@ -2557,7 +2557,7 @@ async function pickSurface(
   }
 
   const { manifest } = await loadSurfaces(PROFILE_ROOT);
-  const profile = ModelProfileSchema.parse({
+  const built = ModelProfileSchema.safeParse({
     id: manifest.pickedId,
     label: "Picked",
     description: `Composed for this session: ${names.length} tools.`,
@@ -2571,7 +2571,20 @@ async function pickSurface(
     workflow: [],
   });
 
-  return { profile, unknown };
+  if (!built.success) {
+    // The SDK validates the tool's own parameters, but a profile is built here,
+    // so a mistake in it is reported like every other refusal: a sentence naming
+    // what is wrong. It used to surface as a raw validation dump.
+    const issues = built.error.issues.slice(0, 4).map((issue) => {
+      const where = issue.path.join(".");
+      return where.length > 0 ? `\`${where}\`: ${issue.message}` : issue.message;
+    });
+    return {
+      failure: `That surface cannot be built:\n${issues.map((line) => `- ${line}`).join("\n")}`,
+    };
+  }
+
+  return { profile: built.data, unknown };
 }
 
 async function applySurface(id: string): Promise<string | null> {
@@ -2980,7 +2993,7 @@ server.tool(
                 "Narrow what an argument may be: enum, minimum, maximum, minLength, maxLength, pattern. Written into the schema and enforced on the call.",
               ),
             output: z
-              .object({
+              .strictObject({
                 sections: z.array(z.string().min(1)).optional(),
                 filter: z.string().optional(),
                 reject: z.string().optional(),

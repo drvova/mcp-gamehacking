@@ -2254,6 +2254,57 @@ const CHECKS = {
     pass("catalog-agrees");
   },
 
+  async "typo-refused"() {
+    // A mistyped key in a constraint or an output rule used to be accepted and
+    // silently dropped: the model believed it had narrowed the range, the schema
+    // said nothing, and nothing was enforced. A rule that quietly does nothing is
+    // worse than no rule, because the model reasons as if it were in force.
+    const responses = await callServer([
+      toolCall(1, "surface", {
+        pick: [{ tool: "search_skills", as: "t1", constrain: { limit: { minimun: 5 } } }],
+      }),
+      toolCall(2, "surface", { pick: [{ tool: "read_agent", as: "t2", output: { hed: 3 } }] }),
+    ]);
+
+    for (const [id, what, key] of [
+      [1, "a mistyped constraint key", "minimun"],
+      [2, "a mistyped output key", "hed"],
+    ]) {
+      const response = responses.get(id);
+      const refused = Boolean(response?.error) || Boolean(response?.result?.isError);
+      assert(refused, `${what} was accepted and silently dropped`);
+      // And it names the key, or the model cannot fix it.
+      const text = JSON.stringify(response);
+      assert(text.includes(key), `the refusal did not name \`${key}\``);
+    }
+
+    // A correctly written rule still works, so the strictness refuses only what
+    // is genuinely wrong.
+    const good = await openSession();
+    try {
+      const composed = await good.request(
+        toolCall(1, "surface", {
+          pick: [
+            {
+              tool: "search_skills",
+              as: "ok",
+              defaults: { limit: 2 },
+              constrain: { limit: { minimum: 1, maximum: 3 } },
+            },
+          ],
+        }),
+      );
+      assert(!composed?.result?.isError, `a valid constraint was refused: ${textOf(composed)}`);
+
+      const outOfRange = await good.request(toolCall(2, "ok", { query: "x", limit: 9 }));
+      assert(Boolean(outOfRange?.result?.isError), "a valid constraint was not enforced");
+    } finally {
+      good.close();
+    }
+
+    pass("typo-refused");
+  },
+
   ledger: checkLedger,
 };
 

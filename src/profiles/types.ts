@@ -47,18 +47,24 @@ const MatchSchema = z.object({
  * wrong in a way that matters — and the narrowed schema says so before the call
  * rather than after it.
  */
-const ConstraintSchema = z.object({
-  enum: z
-    .array(z.union([z.string(), z.number(), z.boolean()]))
-    .min(1)
-    .optional()
-    .describe("The only values accepted"),
-  minimum: z.number().optional().describe("Lowest accepted number"),
-  maximum: z.number().optional().describe("Highest accepted number"),
-  minLength: z.number().int().nonnegative().optional().describe("Shortest accepted string"),
-  maxLength: z.number().int().nonnegative().optional().describe("Longest accepted string"),
-  pattern: z.string().optional().describe("Regular expression the string must match"),
-});
+const ConstraintSchema = z
+  .strictObject({
+    enum: z
+      .array(z.union([z.string(), z.number(), z.boolean()]))
+      .min(1)
+      .optional()
+      .describe("The only values accepted"),
+    minimum: z.number().optional().describe("Lowest accepted number"),
+    maximum: z.number().optional().describe("Highest accepted number"),
+    minLength: z.number().int().nonnegative().optional().describe("Shortest accepted string"),
+    maxLength: z.number().int().nonnegative().optional().describe("Longest accepted string"),
+    pattern: z.string().optional().describe("Regular expression the string must match"),
+  })
+  // Strict, so a mistyped key is REFUSED rather than silently dropped. Writing
+  // `minimun` instead of `minimum` used to be accepted and ignored: the model
+  // believed it had narrowed the range, the schema said nothing, and nothing was
+  // enforced. A constraint that quietly does nothing is worse than no constraint.
+  .describe("Narrow what an argument may be. Unknown keys are rejected, so a typo is caught.");
 
 /**
  * One step of a chain: a tool to run on what the previous step produced.
@@ -126,7 +132,7 @@ const DerivedToolSchema = z.object({
    * a truncated list as the whole truth. Errors are never shaped.
    */
   output: z
-    .object({
+    .strictObject({
       sections: z
         .array(z.string().min(1))
         .optional()

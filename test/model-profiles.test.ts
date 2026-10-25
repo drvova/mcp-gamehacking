@@ -1983,3 +1983,66 @@ describe("the catalogue agrees with reality", () => {
     }
   });
 });
+
+describe("a constraint that does nothing is refused", () => {
+  // A mistyped key used to be accepted and silently dropped: the model believed
+  // it had narrowed the range, the schema said nothing, and nothing was
+  // enforced. A rule that quietly does nothing is worse than no rule, because the
+  // model reasons as if it were in force.
+  it("refuses a mistyped constraint key, naming it", async () => {
+    const session = await openSession();
+    try {
+      const refused = await session.request(
+        toolCall(1, "surface", {
+          pick: [{ tool: "search_skills", as: "typo", constrain: { limit: { minimun: 5 } } }],
+        }),
+      );
+
+      expect(wasRefused(refused)).toBe(true);
+      expect(textOf(refused)).toContain("minimun");
+    } finally {
+      session.close();
+    }
+  });
+
+  it("refuses a mistyped output key", async () => {
+    const session = await openSession();
+    try {
+      const refused = await session.request(
+        toolCall(1, "surface", { pick: [{ tool: "read_agent", as: "typo", output: { hed: 3 } }] }),
+      );
+
+      expect(wasRefused(refused)).toBe(true);
+      expect(textOf(refused)).toContain("hed");
+    } finally {
+      session.close();
+    }
+  });
+
+  it("still accepts and enforces a correctly written constraint", async () => {
+    const session = await openSession();
+    try {
+      // search_skills defaults limit to 20, so a maximum of 3 needs a default
+      // that fits — that rule is separately proven, and this test depends on it.
+      const composed = await session.request(
+        toolCall(1, "surface", {
+          pick: [
+            {
+              tool: "search_skills",
+              as: "ok",
+              defaults: { limit: 2 },
+              constrain: { limit: { minimum: 1, maximum: 3 } },
+            },
+          ],
+        }),
+      );
+      expect(wasRefused(composed)).toBe(false);
+
+      const refused = await session.request(toolCall(2, "ok", { query: "x", limit: 9 }));
+      expect(wasRefused(refused)).toBe(true);
+      expect(textOf(refused)).toContain("at most 3");
+    } finally {
+      session.close();
+    }
+  });
+});

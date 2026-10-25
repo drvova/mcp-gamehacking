@@ -103,3 +103,7 @@ Scope: A model builds its own tooling. The server ships no base of tools and no 
 - [x] G23: The catalogue agrees with the listing — a tool the surface defined is shown and marked, the count matches, one line per entry, and a surface that defines nothing claims nothing
   CHECK: node tools/checks/check.mjs catalog-agrees
   EXPECT: gate-passed:catalog-agrees
+
+- [x] G24: A mistyped key in a constraint or an output rule is refused and named, rather than accepted and silently dropped, and a correctly written rule still works
+  CHECK: node tools/checks/check.mjs typo-refused
+  EXPECT: gate-passed:typo-refused
