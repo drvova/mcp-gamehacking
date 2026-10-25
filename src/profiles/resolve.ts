@@ -145,17 +145,64 @@ export type ShapeableTool = {
 };
 
 /**
+ * The derived entries a surface can actually honour.
+ *
+ * This is the single source of truth for both views of a surface: the listing
+ * asks it which aliases to define, and the call path asks it what an alias binds.
+ * Keeping one implementation is the point — when the two were written separately
+ * they could disagree, and a listing that promises one thing while the call does
+ * another is worse than a missing tool.
+ *
+ * An entry that cannot be honoured is dropped rather than approximated, so a
+ * mistake is visible as a tool that is not carried instead of a tool that lies.
+ * `pick` refuses these outright with an explanation; this is the same rule for a
+ * profile that was hand-edited on disk.
+ */
+export function effectiveDerived<T extends ShapeableTool>(
+  profile: ModelProfile,
+  tools: T[],
+): ModelProfile["tools"]["derived"] {
+  const byName = new Map(tools.map((tool) => [tool.name, tool]));
+  const defined = new Set<string>();
+  const kept: ModelProfile["tools"]["derived"] = [];
+
+  for (const entry of profile.tools.derived) {
+    const base = byName.get(entry.tool);
+    if (base === undefined) continue;
+
+    // First definition wins, so an alias means one thing and one thing only.
+    if (defined.has(entry.as)) continue;
+
+    // Stealing another tool's name would make that tool unreachable. Redefining
+    // a tool under its own name is the documented case and stays allowed.
+    if (entry.as !== entry.tool && byName.has(entry.as)) continue;
+
+    // A bound argument that is not a real argument binds nothing, and would
+    // leave a tool advertising a binding that is not there.
+    const properties = base.inputSchema?.properties;
+    if (properties !== undefined && properties !== null && typeof properties === "object") {
+      if (Object.keys(entry.args).some((key) => !(key in properties))) continue;
+    }
+
+    defined.add(entry.as);
+    kept.push(entry);
+  }
+
+  return kept;
+}
+
+/**
  * The arguments a derived tool fixes, if `name` is one of them.
  *
- * The call path needs the same answer the listing gave, which is what keeps the
- * two views of a surface in agreement: an alias is callable exactly while the
- * active surface declares it.
+ * Resolved through `effectiveDerived`, so an alias is callable exactly while the
+ * listing defines it. The two views cannot drift because there is only one.
  */
-export function boundArgsFor(
+export function boundArgsFor<T extends ShapeableTool>(
   profile: ModelProfile,
   name: string,
+  tools: T[],
 ): { tool: string; args: Record<string, unknown> } | null {
-  const entry = profile.tools.derived.find((candidate) => candidate.as === name);
+  const entry = effectiveDerived(profile, tools).find((candidate) => candidate.as === name);
   if (entry === undefined) return null;
   return { tool: entry.tool, args: entry.args };
 }
@@ -254,16 +301,19 @@ export function shapeTools<T extends ShapeableTool>(
     merged.set(tool.name, override === undefined ? tool : { ...tool, description: override });
   }
 
-  // Define the tools this model asked for. A derived entry may wrap a tool the
-  // surface does not otherwise carry, and an alias equal to its own base name
-  // replaces that base rather than appearing twice.
-  for (const entry of derived) {
-    const base = byName.get(entry.tool);
-    if (base === undefined) continue;
+  // Define the tools this model asked for. An entry may wrap a tool the surface
+  // does not otherwise carry, and an alias equal to its own base name replaces
+  // that base rather than appearing twice. Which entries survive is decided by
+  // `effectiveDerived`, so the listing and the call path agree by construction.
+  for (const entry of effectiveDerived(profile, tools)) {
     if (excluded.has(entry.as)) continue;
     if (include && include.length > 0 && !include.includes(entry.as) && !core.has(entry.as)) {
       continue;
     }
+
+    const base = byName.get(entry.tool);
+    if (base === undefined) continue;
+
     const override = descriptions[entry.as] ?? entry.description;
     merged.set(entry.as, {
       ...base,

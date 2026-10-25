@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "rstack/test";
-import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   PROFILES_DIR,
@@ -485,6 +485,169 @@ describe("defining your own tools", () => {
       expect(toolNames(await session.request(listTools(2)))).toEqual(SEED_SURFACE);
     } finally {
       session.close();
+    }
+  });
+});
+
+describe("a surface cannot lie", () => {
+  // Every case here was a real defect: the surface said one thing and did
+  // another, or made a tool unreachable while claiming it was fine.
+  it("refuses a duplicate alias, so an alias means one thing", async () => {
+    const session = await openSession();
+    try {
+      const refused = await session.request(
+        toolCall(1, "surface", {
+          pick: [
+            { tool: "read_agent", as: "dup", args: { name: "exploit-developer" } },
+            { tool: "list_agents", as: "dup" },
+          ],
+        }),
+      );
+      expect(wasRefused(refused)).toBe(true);
+      expect(textOf(refused)).toContain("dup");
+    } finally {
+      session.close();
+    }
+  });
+
+  it("refuses an alias that steals a registered tool's name", async () => {
+    const session = await openSession();
+    try {
+      const refused = await session.request(
+        toolCall(1, "surface", {
+          pick: [{ tool: "read_agent", as: "search_skills", args: { name: "exploit-developer" } }],
+        }),
+      );
+      expect(wasRefused(refused)).toBe(true);
+      expect(textOf(refused)).toMatch(/already a registered tool/);
+    } finally {
+      session.close();
+    }
+  });
+
+  it("refuses a bound argument that does not exist, and says what does", async () => {
+    const session = await openSession();
+    try {
+      // A typo here would otherwise be advertised as bound and then fail at
+      // call time with a raw validation error.
+      const refused = await session.request(
+        toolCall(1, "surface", {
+          pick: [{ tool: "read_agent", as: "typo", args: { nmae: "exploit-developer" } }],
+        }),
+      );
+      expect(wasRefused(refused)).toBe(true);
+      expect(textOf(refused)).toContain("nmae");
+      expect(textOf(refused)).toContain("`name`");
+    } finally {
+      session.close();
+    }
+  });
+
+  it("reports every problem in one call, not one per round trip", async () => {
+    const session = await openSession();
+    try {
+      const refused = await session.request(
+        toolCall(1, "surface", {
+          pick: [
+            { tool: "read_agent", as: "dup", args: { nmae: "x" } },
+            { tool: "list_agents", as: "dup" },
+            { tool: "read_agent", as: "search_skills" },
+          ],
+        }),
+      );
+      const text = textOf(refused);
+      expect(text).toContain("nmae");
+      expect(text).toContain("dup");
+      expect(text).toContain("search_skills");
+    } finally {
+      session.close();
+    }
+  });
+
+  it("keeps the legitimate redefinition under the tool's own name working", async () => {
+    const session = await openSession();
+    try {
+      const composed = await session.request(
+        toolCall(1, "surface", {
+          pick: [{ tool: "read_agent", args: { name: "exploit-developer" } }],
+        }),
+      );
+      expect(wasRefused(composed)).toBe(false);
+
+      // Redefining a tool under its own name is the documented case; only
+      // taking a DIFFERENT tool's name is refused.
+      const called = await session.request(toolCall(2, "read_agent", {}));
+      expect(textOf(called)).toContain("exploit-developer");
+    } finally {
+      session.close();
+    }
+  });
+
+  it("holds the same rules for a profile hand-edited on disk", async () => {
+    // A hand-written file never passes through `pick`, so the shaper has to
+    // enforce the same rules or the guards are bypassable.
+    const path = join(PROFILES_DIR, "test-liar-probe.json");
+    try {
+      writeFileSync(
+        path,
+        JSON.stringify({
+          id: "test-liar-probe",
+          label: "Liar probe",
+          description: "Hand-edited entries that pick would refuse. Must never survive a run.",
+          match: { clientNames: [], models: [] },
+          tools: {
+            include: ["search_skills", "dup"],
+            order: ["search_skills", "dup"],
+            exclude: [],
+            descriptions: {},
+            derived: [
+              {
+                as: "search_skills",
+                tool: "read_agent",
+                args: { name: "exploit-developer" },
+                argDescriptions: {},
+              },
+              {
+                as: "dup",
+                tool: "read_agent",
+                args: { name: "exploit-developer" },
+                argDescriptions: {},
+              },
+              {
+                as: "dup",
+                tool: "search_skills",
+                args: { query: "kdmapper" },
+                argDescriptions: {},
+              },
+              { as: "typo", tool: "read_agent", args: { nmae: "x" }, argDescriptions: {} },
+            ],
+          },
+          guidance:
+            "Written directly to disk to prove the shaper fails closed on entries pick would refuse.",
+          workflow: [],
+        }),
+        "utf8",
+      );
+
+      const meta = { profile: "test-liar-probe" };
+      const listed = await callServer([listTools(1, meta)]);
+      const names = toolNames(listed.get(1));
+
+      // A stolen name must still be the real tool.
+      const real = await callServer([toolCall(1, "search_skills", { query: "kdmapper" }, meta)]);
+      expect(textOf(real.get(1))).toMatch(/kdmapper/i);
+
+      // An entry that cannot be honoured is dropped, not approximated.
+      expect(names).not.toContain("typo");
+
+      // The listing and the call must agree about which duplicate won.
+      const shown = (listed.get(1)?.result?.tools ?? []).find((tool) => tool.name === "dup");
+      const called = await callServer([toolCall(1, "dup", {}, meta)]);
+      const describesRead = /full definition and system prompt/.test(shown?.description ?? "");
+      const callsRead = textOf(called.get(1)).includes("# Agent:");
+      expect(describesRead).toBe(callsRead);
+    } finally {
+      rmSync(path, { force: true });
     }
   });
 });

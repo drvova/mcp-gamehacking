@@ -958,6 +958,154 @@ const CHECKS = {
     pass("derived-tools");
   },
 
+  async "derived-guards"() {
+    // A surface must never be able to lie: not about what an alias does, not
+    // about which argument it bound, and not by making a real tool unreachable.
+    // Every one of these was a real defect before this gate existed.
+    const bad = await callServer([
+      toolCall(1, "surface", {
+        pick: [
+          { tool: "read_agent", as: "dup", args: { name: "exploit-developer" } },
+          { tool: "list_agents", as: "dup" },
+        ],
+      }),
+      toolCall(2, "surface", {
+        pick: [{ tool: "read_agent", as: "search_skills", args: { name: "exploit-developer" } }],
+      }),
+      toolCall(3, "surface", {
+        pick: [{ tool: "read_agent", as: "typo", args: { nmae: "exploit-developer" } }],
+      }),
+    ]);
+
+    for (const [id, what] of [
+      [1, "a duplicate alias"],
+      [2, "an alias stealing a registered tool's name"],
+      [3, "a bound argument that does not exist"],
+    ]) {
+      const response = bad.get(id);
+      assert(
+        Boolean(response?.error) || Boolean(response?.result?.isError),
+        `${what} was accepted`,
+      );
+    }
+
+    // A typo must name the real arguments, or the caller cannot fix it.
+    assert(
+      textOf(bad.get(3)).includes("`name`"),
+      "a rejected bound argument did not say what the tool actually takes",
+    );
+
+    // All problems at once, not one per round trip.
+    const many = await callServer([
+      toolCall(1, "surface", {
+        pick: [
+          { tool: "read_agent", as: "dup", args: { nmae: "x" } },
+          { tool: "list_agents", as: "dup" },
+          { tool: "read_agent", as: "search_skills" },
+        ],
+      }),
+    ]);
+    const report = textOf(many.get(1));
+    assert(
+      report.includes("nmae") && report.includes("dup") && report.includes("search_skills"),
+      `one call did not report every problem: ${report.slice(0, 200)}`,
+    );
+
+    // The same rules must hold for a profile that was hand-edited on disk, which
+    // never passes through `pick` at all.
+    const id = "gate-probe-liar";
+    const path = join(ROOT, "model-profiles", `${id}.json`);
+    cleanupProfile(id);
+
+    try {
+      writeFileSync(
+        path,
+        JSON.stringify({
+          id,
+          label: "Liar probe",
+          description: "Hand-edited entries that pick would refuse; must never survive a run.",
+          match: { clientNames: [], models: [] },
+          tools: {
+            include: ["search_skills", "dup"],
+            order: ["search_skills", "dup"],
+            exclude: [],
+            descriptions: {},
+            derived: [
+              {
+                as: "search_skills",
+                tool: "read_agent",
+                args: { name: "exploit-developer" },
+                argDescriptions: {},
+              },
+              {
+                as: "dup",
+                tool: "read_agent",
+                args: { name: "exploit-developer" },
+                argDescriptions: {},
+              },
+              {
+                as: "dup",
+                tool: "search_skills",
+                args: { query: "kdmapper" },
+                argDescriptions: {},
+              },
+              { as: "typo", tool: "read_agent", args: { nmae: "x" }, argDescriptions: {} },
+            ],
+          },
+          guidance:
+            "Written directly to disk to prove the shaper fails closed on entries that pick would refuse.",
+          workflow: [],
+        }),
+        "utf8",
+      );
+
+      const meta = { profile: id };
+      const listed = await callServer([listTools(1, meta)]);
+      const names = toolNames(listed.get(1));
+
+      // The stolen name must still be the real tool.
+      const real = await callServer([toolCall(1, "search_skills", { query: "kdmapper" }, meta)]);
+      assert(!real.get(1)?.result?.isError, "the real tool was not callable");
+      assert(
+        /kdmapper/i.test(textOf(real.get(1))),
+        "a hand-edited file hijacked a registered tool's name",
+      );
+
+      // An entry that cannot be honoured is dropped, not approximated.
+      assert(!names.includes("typo"), "an entry with a bogus argument was still defined");
+
+      // And for a duplicated alias, the listing and the call must agree about
+      // which entry won: they disagreed before this was resolved from one place.
+      assert(names.includes("dup"), "the duplicated alias vanished entirely");
+      const shown = (listed.get(1)?.result?.tools ?? []).find((tool) => tool.name === "dup");
+      const called = await callServer([toolCall(1, "dup", {}, meta)]);
+
+      // The markers must be unambiguous: read_agent answers with an agent body,
+      // search_skills with a result list, and neither description mentions the
+      // other's business. A loose match here would pass on either branch.
+      const describesRead = /full definition and system prompt/.test(shown?.description ?? "");
+      const describesSearch = /Scored keyword search/.test(shown?.description ?? "");
+      const callsRead = textOf(called.get(1)).includes("# Agent:");
+      const callsSearch = /Found \d+ skills/.test(textOf(called.get(1)));
+
+      assert(
+        describesRead !== describesSearch,
+        `the listing describes neither entry cleanly: ${(shown?.description ?? "").slice(0, 80)}`,
+      );
+      assert(callsRead !== callsSearch, "the call matched neither entry cleanly");
+      assert(
+        describesRead === callsRead,
+        `the listing and the call disagree about \`dup\`: listing says read_agent=${describesRead}, ` +
+          `call says read_agent=${callsRead}`,
+      );
+    } finally {
+      rmSync(path, { force: true });
+      cleanupProfile(id);
+    }
+
+    pass("derived-guards");
+  },
+
   ledger: checkLedger,
 };
 

@@ -1846,7 +1846,14 @@ for (const { singular, plural, dir } of componentTools) {
 /** Root that holds the archive data and the model-authored profiles. */
 const PROFILE_ROOT = ROOT;
 
-type ToolListResult = { tools: Array<{ name: string; description?: string }> };
+type ToolListResult = {
+  tools: Array<{
+    name: string;
+    description?: string;
+    /** Present on every SDK-registered tool; the shaper narrows it for aliases. */
+    inputSchema?: Record<string, unknown>;
+  }>;
+};
 type ToolListHandler = (
   request: unknown,
   extra: unknown,
@@ -1943,7 +1950,9 @@ function installProfileAwareCall(mcp: McpServer): boolean {
     const session = getSessionSurface();
 
     const resolved = await resolveProfile(PROFILE_ROOT, { meta, clientName, session });
-    const bound = boundArgsFor(resolved.profile, request.params.name);
+    // Resolved against the same registered list the listing was shaped from, so
+    // an alias is callable exactly while the surface defines it.
+    const bound = boundArgsFor(resolved.profile, request.params.name, await listRegisteredTools());
     if (bound === null) return original(request, extra);
 
     return original(
@@ -2024,6 +2033,57 @@ async function pickSurface(
       failure:
         `None of those tools exist: ${unknown.join(", ")}. ` +
         "Call `surface` with no arguments to see the catalogue.",
+    };
+  }
+
+  // Validate every entry before building anything, so one call reports all the
+  // problems at once instead of one per round trip.
+  const definitions = new Map(all.map((tool) => [tool.name, tool]));
+  const problems: string[] = [];
+  const seen = new Set<string>();
+
+  for (const entry of known) {
+    const alias = entry.alias || entry.tool;
+
+    if (seen.has(alias)) {
+      problems.push(`\`${alias}\` is defined twice; each name may appear once`);
+      continue;
+    }
+    seen.add(alias);
+
+    // Stealing a different tool's name would make that tool unreachable and the
+    // listing dishonest about what it does. Redefining a tool under its own name
+    // is the documented case, so only a collision with ANOTHER name is refused.
+    if (alias !== entry.tool && available.has(alias)) {
+      problems.push(
+        `\`${alias}\` is already a registered tool, so it cannot be redefined to wrap \`${entry.tool}\`; ` +
+          `name it something else, or omit \`as\` to redefine \`${entry.tool}\` itself`,
+      );
+      continue;
+    }
+
+    // A bound argument that is not a real argument binds nothing: the tool would
+    // advertise the binding and then fail when called. Refuse it and say what
+    // the tool actually takes.
+    const properties = definitions.get(entry.tool)?.inputSchema?.properties;
+    if (entry.args && properties && typeof properties === "object") {
+      const bogus = Object.keys(entry.args).filter((key) => !(key in properties));
+      if (bogus.length > 0) {
+        const real = Object.keys(properties);
+        problems.push(
+          `\`${entry.tool}\` has no argument ${bogus.map((key) => `\`${key}\``).join(", ")}; ` +
+            (real.length > 0
+              ? `it takes ${real.map((key) => `\`${key}\``).join(", ")}`
+              : "it takes no arguments"),
+        );
+        continue;
+      }
+    }
+  }
+
+  if (problems.length > 0) {
+    return {
+      failure: `That surface cannot be built:\n${problems.map((line) => `- ${line}`).join("\n")}`,
     };
   }
 
