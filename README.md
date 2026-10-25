@@ -104,7 +104,7 @@ MCP (Model Context Protocol) server for game hacking & reverse engineering. A st
 
 ---
 
-## Tools (16 total)
+## Tools (31 total)
 
 ### Workflow Tools
 
@@ -132,6 +132,68 @@ MCP (Model Context Protocol) server for game hacking & reverse engineering. A st
 | `list_subagents` / `read_subagent` | Browse and read subagent definitions |
 | `list_plugins` / `read_plugin`     | Browse and read plugin definitions   |
 | `list_prompts` / `read_prompt`     | Browse and read prompt templates     |
+
+### Profile Tools
+
+| Tool                   | Description                                          |
+| ---------------------- | ---------------------------------------------------- |
+| `list_model_profiles`  | List built-in and model-authored profiles            |
+| `get_model_profile`    | Report the profile governing this session, and why   |
+| `set_model_profile`    | Select a profile for the session, or `auto` to clear |
+| `define_model_profile` | Author and persist a new profile                     |
+
+---
+
+## Model Profiles
+
+Models differ in which tools they drive well. The server resolves a profile per
+session and uses it to order — and optionally narrow — the tool listing, and to
+return guidance written for that model.
+
+`tools/list` is shaped by the active profile; **calling is never restricted**.
+A tool omitted from the listing remains callable by name, so a wrong or hostile
+profile can only affect presentation, never capability.
+
+### Resolution order
+
+The first match wins:
+
+1. `_meta.profile` on the request — an explicit profile id
+2. `_meta.model` on the request — matched against each profile's `models`
+3. the session override set by `set_model_profile`
+4. `MCP_MODEL_PROFILE` or `MCP_MODEL` in the environment
+5. the client name reported at initialize, matched against `clientNames`
+6. `default` — the full, unshaped surface
+
+An unrecognised caller always lands on `default`, which presents every tool in
+registration order.
+
+### Built-in profiles
+
+`default`, `claude`, `gpt`, `gemini`, `compact` and `local`. The last two
+demonstrate narrowing: `compact` lists five tools, `local` lists four.
+
+### Authoring a profile
+
+A model can write its own profile; it is stored in `model-profiles/<id>.json`
+and is available to later sessions:
+
+```jsonc
+// define_model_profile
+{
+  "id": "my-model",
+  "label": "My Model",
+  "description": "When this profile fits",
+  "guidance": "Model-specific operating guidance, at least 80 characters.",
+  "models": ["my-model-name"],
+  "tool_order": ["search_skills", "read_skill"],
+  "tool_include": ["search_skills", "read_skill"],
+  "workflow": ["Search first.", "Then read."],
+}
+```
+
+Ids are restricted to lowercase kebab-case and Windows reserved device names are
+rejected, so a profile id can never resolve to a path outside `model-profiles/`.
 
 ---
 
@@ -247,7 +309,14 @@ Kernel exploit and driver development agent...
 
 ```
 mcp-gamehacking/
-+-- src/index.ts              # MCP server (16 tools)
++-- src/index.ts              # MCP server (31 tools)
++-- src/profiles/             # Per-model profile layer
++|   +-- types.ts              #   profile schema and id rules
++|   +-- builtin.ts            #   built-in profiles
++|   +-- registry.ts           #   load, validate, persist
++|   +-- resolve.ts            #   resolution order and tool shaping
++-- model-profiles/            # Model-authored profiles (JSON)
++-- test/                      # Rstest suites
 +-- dist/                      # Compiled JS
 +-- skills/                    # 4,161 skill directories
 |   +-- <hand-written>/        #   177 curated deep-dive skills
