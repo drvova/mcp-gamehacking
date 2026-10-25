@@ -186,6 +186,40 @@ caller sending one is reaching past what it was shown. A partial binding keeps
 everything it did not bind — `args: { limit: 5 }` on a three-argument tool leaves
 a two-argument tool.
 
+### Four things you can do to an argument
+
+They are deliberately different, and the difference is the point:
+
+|                   | what happens                      | why                                |
+| ----------------- | --------------------------------- | ---------------------------------- |
+| `args`            | leaves the schema, always wins    | the decision is gone               |
+| `defaults`        | stays, omittable, shows the value | _"this, unless you say otherwise"_ |
+| `constrain`       | stays, narrows, **enforced**      | the wrong value cannot get through |
+| `argDescriptions` | stays, re-worded                  | said the way you need to hear it   |
+
+```
+surface { pick: [
+  { tool: "search_skills", as: "find",
+    defaults:  { limit: 3 },
+    constrain: { limit: { minimum: 1, maximum: 3 } },
+    argDescriptions: { query: "What you are looking for." } }
+] }
+```
+
+A constraint is **enforced, not advertised**: a schema that lists an enum while
+the server accepts anything is a lie, so a value outside the range is refused and
+the refusal names what was allowed. Constraints cover `enum`, `minimum`,
+`maximum`, `minLength`, `maxLength` and `pattern`.
+
+Two contradictions are refused rather than accepted as no-ops, because either
+would leave the surface saying something it does not do:
+
+- a `defaults` or `constrain` on an argument you also **fixed** — the fixed value
+  wins, so the other is inert;
+- a constraint the tool's **own default** would break. `search_skills` defaults
+  `limit` to 20, so narrowing the maximum to 3 without also setting a `defaults`
+  that fits is refused, and the refusal says which default it conflicts with.
+
 Omit `as` and the tool is redefined under its own name: _"`read_source`, but for
 me `name` is already set."_
 

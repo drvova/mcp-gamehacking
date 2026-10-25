@@ -1104,6 +1104,212 @@ const CHECKS = {
     pass("derived-guards");
   },
 
+  async "derived-narrowing"() {
+    // Four things can happen to an argument, and they are deliberately distinct:
+    // fixed (leaves the schema), defaulted (stays, omittable, shows the value),
+    // constrained (stays, narrows, and is ENFORCED), re-worded (stays, renamed).
+    // This proves the middle two, which is where a surface most easily lies: a
+    // default that is ignored, or a range that is advertised but not kept.
+    //
+    // Everything here runs without the skill archive. The success paths use
+    // `read_agent`, which reads the committed agents/ tree, and the numeric
+    // range is proven by its REFUSAL, which the surface layer decides before the
+    // tool executes. A check that needs absent data would fail on CI while
+    // passing locally, which is how an earlier version of this gate behaved.
+    const session = await openSession();
+    try {
+      const composed = await session.request(
+        toolCall(1, "surface", {
+          pick: [
+            {
+              tool: "read_agent",
+              as: "mine",
+              defaults: { name: "exploit-developer" },
+              constrain: { name: { enum: ["exploit-developer", "anti-cheat-analyst"] } },
+              argDescriptions: { name: "Which agent to read." },
+            },
+          ],
+        }),
+      );
+      assert(!composed?.result?.isError, `default + constraint refused: ${textOf(composed)}`);
+
+      const mine = ((await session.request(listTools(2)))?.result?.tools ?? []).find(
+        (tool) => tool.name === "mine",
+      );
+      assert(mine, "the narrowed tool was not listed");
+      const name = mine.inputSchema?.properties?.name ?? {};
+
+      // The schema must say what will happen: the value it will use, the set it
+      // will enforce, and the argument must stay overridable.
+      assert(name.default === "exploit-developer", "the default is not visible in the schema");
+      assert(
+        Array.isArray(name.enum) && name.enum.length === 2,
+        "the constraint is not written into the schema",
+      );
+      assert(
+        !(mine.inputSchema?.required ?? []).includes("name"),
+        "an argument with a default must not still be required",
+      );
+
+      // Omitted: the default applies.
+      const omitted = await session.request(toolCall(3, "mine", {}));
+      assert(!omitted?.result?.isError, `the defaulted call failed: ${textOf(omitted)}`);
+      assert(
+        textOf(omitted).includes("# Agent: exploit-developer"),
+        `the default was not applied: ${textOf(omitted).slice(0, 60)}`,
+      );
+
+      // Supplied and allowed: the caller wins over the default.
+      const allowed = await session.request(toolCall(4, "mine", { name: "anti-cheat-analyst" }));
+      assert(!allowed?.result?.isError, "a value inside the enum was refused");
+      assert(
+        textOf(allowed).includes("# Agent: anti-cheat-analyst"),
+        "the caller's value did not override the default",
+      );
+
+      // Supplied and outside the enum: refused, and the refusal names the set.
+      const refused = await session.request(toolCall(5, "mine", { name: "not-in-the-list" }));
+      assert(Boolean(refused?.result?.isError), "a value outside the enum was accepted");
+      assert(
+        textOf(refused).includes("exploit-developer"),
+        "the refusal did not list the allowed values",
+      );
+    } finally {
+      session.close();
+    }
+
+    // A numeric range is enforced too, and the refusal names the bound.
+    const numeric = await openSession();
+    try {
+      await numeric.request(
+        toolCall(1, "surface", {
+          pick: [
+            {
+              tool: "search_skills",
+              as: "find",
+              defaults: { limit: 3 },
+              constrain: { limit: { minimum: 1, maximum: 3 } },
+            },
+          ],
+        }),
+      );
+      const outOfRange = await numeric.request(
+        toolCall(2, "find", { query: "kdmapper", limit: 99 }),
+      );
+      assert(Boolean(outOfRange?.result?.isError), "a value outside the range was accepted");
+      assert(textOf(outOfRange).includes("at most 3"), "the refusal did not say what the range is");
+    } finally {
+      numeric.close();
+    }
+
+    // The contradictions. Each would leave the surface saying something it does
+    // not do, so each is refused rather than accepted as a no-op.
+    const conflicts = await callServer([
+      // The tool's own default (20) is outside the narrowed range.
+      toolCall(1, "surface", {
+        pick: [{ tool: "search_skills", as: "c1", constrain: { limit: { maximum: 3 } } }],
+      }),
+      // A default outside its own constraint.
+      toolCall(2, "surface", {
+        pick: [
+          {
+            tool: "search_skills",
+            as: "c2",
+            defaults: { limit: 99 },
+            constrain: { limit: { maximum: 3 } },
+          },
+        ],
+      }),
+      // A default or constraint on a fixed argument is inert.
+      toolCall(3, "surface", {
+        pick: [
+          {
+            tool: "read_agent",
+            as: "c3",
+            args: { name: "exploit-developer" },
+            defaults: { name: "other" },
+          },
+        ],
+      }),
+    ]);
+
+    for (const [id, what] of [
+      [1, "a constraint the tool's own default breaks"],
+      [2, "a default that breaks its own constraint"],
+      [3, "a default on a fixed argument"],
+    ]) {
+      const response = conflicts.get(id);
+      assert(
+        Boolean(response?.error) || Boolean(response?.result?.isError),
+        `${what} was accepted`,
+      );
+    }
+    assert(
+      /already defaults/i.test(textOf(conflicts.get(1))),
+      "the conflicting constraint did not explain which default it breaks",
+    );
+
+    // And it must survive the process, because it is part of what was built.
+    const id = "gate-probe-narrowing";
+    const path = cleanupProfile(id);
+    try {
+      const builder = await openSession();
+      try {
+        await builder.request(
+          toolCall(1, "surface", {
+            pick: [
+              {
+                tool: "read_agent",
+                as: "mine",
+                defaults: { name: "exploit-developer" },
+                argDescriptions: { name: "Which agent to read." },
+              },
+            ],
+          }),
+        );
+        const saved = await builder.request(
+          toolCall(2, "surface", {
+            save: id,
+            guidance:
+              "A gate probe carrying a default, to prove it survives a process boundary rather than living in memory.",
+          }),
+        );
+        assert(!saved?.result?.isError, `saving failed: ${textOf(saved)}`);
+      } finally {
+        builder.close();
+      }
+
+      const reopened = await openSession();
+      try {
+        await reopened.request(toolCall(1, "surface", { set: id }));
+        const mine = ((await reopened.request(listTools(2)))?.result?.tools ?? []).find(
+          (tool) => tool.name === "mine",
+        );
+        assert(
+          mine?.inputSchema?.properties?.name?.default === "exploit-developer",
+          "the default was lost",
+        );
+        assert(
+          mine?.inputSchema?.properties?.name?.description === "Which agent to read.",
+          "the re-wording was lost",
+        );
+        assert(
+          textOf(await reopened.request(toolCall(3, "mine", {}))).includes(
+            "# Agent: exploit-developer",
+          ),
+          "the recalled default was not applied",
+        );
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      cleanupProfile(id);
+    }
+
+    assert(!existsSync(path), "cleanup failed to remove the probe surface");
+    pass("derived-narrowing");
+  },
+
   ledger: checkLedger,
 };
 

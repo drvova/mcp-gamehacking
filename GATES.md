@@ -75,3 +75,7 @@ Scope: A model builds its own tooling. The server ships no base of tools and no 
 - [x] G16: A surface cannot lie: a duplicate alias, a stolen tool name and a bogus bound argument are all refused (and all reported at once), and a hand-edited file is held to the same rules with the listing and the call agreeing
   CHECK: node tools/checks/check.mjs derived-guards
   EXPECT: gate-passed:derived-guards
+
+- [x] G17: An argument can be defaulted (stays, omittable, shown) or constrained (narrows and is enforced), the schema says what will actually happen, and a constraint the tool's own default would break is refused rather than shipped
+  CHECK: node tools/checks/check.mjs derived-narrowing
+  EXPECT: gate-passed:derived-narrowing

@@ -39,6 +39,27 @@ const MatchSchema = z.object({
  * already set, and if models do not perform equally then the call shape is
  * exactly where a weaker one fails. Binding removes the decision.
  */
+/**
+ * What an argument is allowed to be, for arguments the caller keeps.
+ *
+ * Binding removes a decision; constraining narrows one. A `limit` that can only
+ * be 1-20, or a category that must be one of five known values, cannot be got
+ * wrong in a way that matters — and the narrowed schema says so before the call
+ * rather than after it.
+ */
+const ConstraintSchema = z.object({
+  enum: z
+    .array(z.union([z.string(), z.number(), z.boolean()]))
+    .min(1)
+    .optional()
+    .describe("The only values accepted"),
+  minimum: z.number().optional().describe("Lowest accepted number"),
+  maximum: z.number().optional().describe("Highest accepted number"),
+  minLength: z.number().int().nonnegative().optional().describe("Shortest accepted string"),
+  maxLength: z.number().int().nonnegative().optional().describe("Longest accepted string"),
+  pattern: z.string().optional().describe("Regular expression the string must match"),
+});
+
 const DerivedToolSchema = z.object({
   /** The name this derived tool answers to. */
   as: z.string().min(1),
@@ -47,9 +68,18 @@ const DerivedToolSchema = z.object({
   /**
    * Arguments fixed for this tool. They are removed from the schema, not merely
    * ignored at call time: an argument the caller can still see is one the caller
-   * can still get wrong.
+   * can still get wrong. A fixed argument always wins, so it cannot also carry a
+   * `defaults` or `constrain` entry.
    */
   args: z.record(z.string(), z.unknown()).default({}),
+  /**
+   * Values used when the caller omits an argument. Unlike `args`, the argument
+   * stays in the schema and can still be overridden — the difference between
+   * "always this" and "this unless you say otherwise".
+   */
+  defaults: z.record(z.string(), z.unknown()).default({}),
+  /** Narrowed accepted values for arguments the caller keeps. */
+  constrain: z.record(z.string(), ConstraintSchema).default({}),
   /** Wording to use instead of the base tool's description. */
   description: z.string().min(1).optional(),
   /** Per-argument wording for the arguments that remain. */

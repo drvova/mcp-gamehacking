@@ -14,6 +14,7 @@ import {
   setSessionSurface,
   shapeTools,
   boundArgsFor,
+  checkConstraint,
 } from "./profiles/resolve.js";
 import { ModelProfileSchema, PROFILE_ID_MESSAGE, PROFILE_ID_PATTERN } from "./profiles/types.js";
 import type { ModelProfile } from "./profiles/types.js";
@@ -1952,18 +1953,39 @@ function installProfileAwareCall(mcp: McpServer): boolean {
     const resolved = await resolveProfile(PROFILE_ROOT, { meta, clientName, session });
     // Resolved against the same registered list the listing was shaped from, so
     // an alias is callable exactly while the surface defines it.
-    const bound = boundArgsFor(resolved.profile, request.params.name, await listRegisteredTools());
-    if (bound === null) return original(request, extra);
+    const entry = boundArgsFor(resolved.profile, request.params.name, await listRegisteredTools());
+    if (entry === null) return original(request, extra);
+
+    const supplied = request.params.arguments ?? {};
+    const merged: Record<string, unknown> = { ...supplied };
+
+    // A default applies only where the caller said nothing. This is the
+    // difference from a fixed argument, which wins regardless.
+    for (const [key, value] of Object.entries(entry.defaults)) {
+      if (!(key in merged)) merged[key] = value;
+    }
+
+    // A constraint narrows what the caller may send, so it is enforced here
+    // rather than only written into the schema: a schema that lists an enum
+    // while the server accepts anything is a lie.
+    const violations: string[] = [];
+    for (const [key, rule] of Object.entries(entry.constrain)) {
+      if (!(key in merged)) continue;
+      const problem = checkConstraint(merged[key], rule);
+      if (problem !== null) violations.push(`\`${key}\` ${problem}`);
+    }
+    if (violations.length > 0) {
+      return err(
+        `\`${request.params.name}\` refused that call:\n` +
+          violations.map((line) => `- ${line}`).join("\n"),
+      );
+    }
+
+    // A fixed argument wins last, so nothing the caller sends can undo it.
+    Object.assign(merged, entry.args);
 
     return original(
-      {
-        ...request,
-        params: {
-          ...request.params,
-          name: bound.tool,
-          arguments: { ...(request.params.arguments ?? {}), ...bound.args },
-        },
-      },
+      { ...request, params: { ...request.params, name: entry.tool, arguments: merged } },
       extra,
     );
   });
@@ -1981,6 +2003,8 @@ type PickEntry =
       tool: string;
       as?: string;
       args?: Record<string, unknown>;
+      defaults?: Record<string, unknown>;
+      constrain?: Record<string, Record<string, unknown>>;
       description?: string;
       argDescriptions?: Record<string, string>;
     };
@@ -2013,6 +2037,8 @@ async function pickSurface(
             tool: entry.tool.trim(),
             alias: entry.as?.trim(),
             args: entry.args,
+            defaults: entry.defaults,
+            constrain: entry.constrain,
             description: entry.description,
             argDescriptions: entry.argDescriptions,
           },
@@ -2066,8 +2092,13 @@ async function pickSurface(
     // advertise the binding and then fail when called. Refuse it and say what
     // the tool actually takes.
     const properties = definitions.get(entry.tool)?.inputSchema?.properties;
-    if (entry.args && properties && typeof properties === "object") {
-      const bogus = Object.keys(entry.args).filter((key) => !(key in properties));
+    if (properties && typeof properties === "object") {
+      const named = [
+        ...Object.keys(entry.args ?? {}),
+        ...Object.keys(entry.defaults ?? {}),
+        ...Object.keys(entry.constrain ?? {}),
+      ];
+      const bogus = [...new Set(named)].filter((key) => !(key in properties));
       if (bogus.length > 0) {
         const real = Object.keys(properties);
         problems.push(
@@ -2078,6 +2109,49 @@ async function pickSurface(
         );
         continue;
       }
+    }
+
+    // A fixed argument always wins, so a default or a constraint for the same
+    // argument would be inert. Say so rather than accepting a no-op.
+    const fixed = new Set(Object.keys(entry.args ?? {}));
+    const inert = [
+      ...Object.keys(entry.defaults ?? {}),
+      ...Object.keys(entry.constrain ?? {}),
+    ].filter((key) => fixed.has(key));
+    if (inert.length > 0) {
+      problems.push(
+        `${inert.map((key) => `\`${key}\``).join(", ")} on \`${entry.tool}\` is fixed and also ` +
+          "given a default or a constraint; a fixed argument wins, so pick one",
+      );
+      continue;
+    }
+
+    // A constraint has to hold for the value that will ACTUALLY be used, not
+    // only for what the caller sends. If the tool's own default falls outside
+    // the narrowed range, the schema would advertise a limit it does not keep,
+    // so the conflict is reported rather than left to surprise a call.
+    const conflict: string[] = [];
+    for (const [key, rule] of Object.entries(entry.constrain ?? {})) {
+      const preset = entry.defaults?.[key];
+      if (preset !== undefined) {
+        const problem = checkConstraint(preset, rule);
+        if (problem !== null) conflict.push(`your default for \`${key}\` ${problem}`);
+        continue;
+      }
+      const baseDefault = (properties as Record<string, { default?: unknown }>)[key]?.default;
+      if (baseDefault !== undefined) {
+        const problem = checkConstraint(baseDefault, rule);
+        if (problem !== null) {
+          conflict.push(
+            `\`${entry.tool}\` already defaults \`${key}\` to ${JSON.stringify(baseDefault)}, ` +
+              `which ${problem} — set a \`defaults\` for it that fits, or loosen the constraint`,
+          );
+        }
+      }
+    }
+    if (conflict.length > 0) {
+      problems.push(...conflict);
+      continue;
     }
   }
 
@@ -2091,11 +2165,19 @@ async function pickSurface(
   const names: string[] = [];
   for (const entry of known) {
     const alias = entry.alias || entry.tool;
-    if (alias !== entry.tool || entry.args !== undefined || entry.description !== undefined) {
+    const definesSomething =
+      alias !== entry.tool ||
+      entry.args !== undefined ||
+      entry.defaults !== undefined ||
+      entry.constrain !== undefined ||
+      entry.description !== undefined;
+    if (definesSomething) {
       derived.push({
         as: alias,
         tool: entry.tool,
         args: entry.args ?? {},
+        defaults: entry.defaults ?? {},
+        constrain: entry.constrain ?? {},
         ...(entry.description === undefined ? {} : { description: entry.description }),
         argDescriptions: entry.argDescriptions ?? {},
       });
@@ -2331,7 +2413,19 @@ server.tool(
               .record(z.string(), z.unknown())
               .optional()
               .describe(
-                "Arguments to set for you. They leave the schema, so you cannot get them wrong when you call.",
+                "Arguments fixed for you. They leave the schema, so you cannot get them wrong when you call, and they win over anything you send.",
+              ),
+            defaults: z
+              .record(z.string(), z.unknown())
+              .optional()
+              .describe(
+                "Values used when you omit an argument. Unlike `args`, the argument stays visible and you can still override it.",
+              ),
+            constrain: z
+              .record(z.string(), z.record(z.string(), z.unknown()))
+              .optional()
+              .describe(
+                "Narrow what an argument may be: enum, minimum, maximum, minLength, maxLength, pattern. Written into the schema and enforced on the call.",
               ),
             description: z.string().min(1).optional().describe("Wording to use for it"),
             argDescriptions: z

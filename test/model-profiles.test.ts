@@ -655,3 +655,213 @@ describe("a surface cannot lie", () => {
     }
   });
 });
+
+describe("defaults and constraints", () => {
+  // These use `read_agent`, which reads the committed agents/ tree. Anything
+  // archive-backed would assert against "not present" on a CI checkout, which
+  // is exactly how an earlier version of these checks failed the runner while
+  // passing locally.
+  it("uses a default when the argument is omitted, and yields to the caller", async () => {
+    const session = await openSession();
+    try {
+      await session.request(
+        toolCall(1, "surface", {
+          pick: [{ tool: "read_agent", as: "mine", defaults: { name: "exploit-developer" } }],
+        }),
+      );
+
+      const mine = ((await session.request(listTools(2)))?.result?.tools ?? []).find(
+        (tool) => tool.name === "mine",
+      );
+      // The argument stays, so it can still be overridden: that is the
+      // difference between a default and a fixed argument.
+      expect(Object.keys(mine?.inputSchema?.properties ?? {})).toContain("name");
+      expect(mine?.inputSchema?.properties?.name?.default).toBe("exploit-developer");
+      expect(mine?.inputSchema?.required ?? []).not.toContain("name");
+
+      expect(textOf(await session.request(toolCall(3, "mine", {})))).toContain(
+        "# Agent: exploit-developer",
+      );
+
+      const explicit = await session.request(toolCall(4, "mine", { name: "anti-cheat-analyst" }));
+      expect(textOf(explicit)).toContain("# Agent: anti-cheat-analyst");
+    } finally {
+      session.close();
+    }
+  });
+
+  it("enforces an enum constraint, naming the allowed values when it refuses", async () => {
+    const session = await openSession();
+    try {
+      await session.request(
+        toolCall(1, "surface", {
+          pick: [
+            {
+              tool: "read_agent",
+              as: "mine",
+              constrain: { name: { enum: ["exploit-developer", "anti-cheat-analyst"] } },
+            },
+          ],
+        }),
+      );
+
+      const mine = ((await session.request(listTools(2)))?.result?.tools ?? []).find(
+        (tool) => tool.name === "mine",
+      );
+      expect(mine?.inputSchema?.properties?.name?.enum).toEqual([
+        "exploit-developer",
+        "anti-cheat-analyst",
+      ]);
+
+      expect(
+        wasRefused(await session.request(toolCall(3, "mine", { name: "anti-cheat-analyst" }))),
+      ).toBe(false);
+
+      // A schema that advertises an enum while the server accepts anything is a
+      // lie, so the constraint is enforced rather than only shown.
+      const refused = await session.request(toolCall(4, "mine", { name: "not-in-the-list" }));
+      expect(wasRefused(refused)).toBe(true);
+      expect(textOf(refused)).toContain("exploit-developer");
+    } finally {
+      session.close();
+    }
+  });
+
+  it("enforces a numeric range before the tool runs", async () => {
+    const session = await openSession();
+    try {
+      await session.request(
+        toolCall(1, "surface", {
+          pick: [
+            {
+              tool: "search_skills",
+              as: "find",
+              defaults: { limit: 3 },
+              constrain: { limit: { minimum: 1, maximum: 3 } },
+            },
+          ],
+        }),
+      );
+
+      // The refusal happens in the surface layer, before the tool executes, so
+      // this holds without the skill archive.
+      const refused = await session.request(toolCall(2, "find", { query: "kdmapper", limit: 99 }));
+      expect(wasRefused(refused)).toBe(true);
+      expect(textOf(refused)).toContain("at most 3");
+    } finally {
+      session.close();
+    }
+  });
+
+  it("refuses a constraint the tool's own default would break", async () => {
+    const session = await openSession();
+    try {
+      // search_skills defaults limit to 20. Narrowing the maximum to 3 while
+      // leaving that default in place would advertise a limit it does not keep.
+      const refused = await session.request(
+        toolCall(1, "surface", {
+          pick: [{ tool: "search_skills", as: "find", constrain: { limit: { maximum: 3 } } }],
+        }),
+      );
+      expect(wasRefused(refused)).toBe(true);
+      expect(textOf(refused)).toMatch(/already defaults/i);
+    } finally {
+      session.close();
+    }
+  });
+
+  it("refuses a default that breaks its own constraint", async () => {
+    const session = await openSession();
+    try {
+      const refused = await session.request(
+        toolCall(1, "surface", {
+          pick: [
+            {
+              tool: "search_skills",
+              as: "find",
+              defaults: { limit: 99 },
+              constrain: { limit: { maximum: 3 } },
+            },
+          ],
+        }),
+      );
+      expect(wasRefused(refused)).toBe(true);
+      expect(textOf(refused)).toMatch(/your default/i);
+    } finally {
+      session.close();
+    }
+  });
+
+  it("refuses a default or constraint on a fixed argument, which would be inert", async () => {
+    const session = await openSession();
+    try {
+      const refused = await session.request(
+        toolCall(1, "surface", {
+          pick: [
+            {
+              tool: "read_agent",
+              as: "pinned",
+              args: { name: "exploit-developer" },
+              defaults: { name: "other" },
+            },
+          ],
+        }),
+      );
+      expect(wasRefused(refused)).toBe(true);
+      expect(textOf(refused)).toMatch(/fixed/i);
+    } finally {
+      session.close();
+    }
+  });
+
+  it("survives a save and a fresh process", async () => {
+    const probe = cleanupProbe();
+    try {
+      const builder = await openSession();
+      try {
+        await builder.request(
+          toolCall(1, "surface", {
+            pick: [
+              {
+                tool: "read_agent",
+                as: "mine",
+                defaults: { name: "exploit-developer" },
+                argDescriptions: { name: "Which agent to read." },
+              },
+            ],
+          }),
+        );
+        expect(
+          wasRefused(
+            await builder.request(
+              toolCall(2, "surface", {
+                save: PROBE_ID,
+                guidance:
+                  "A surface carrying a default, saved to prove it survives a process boundary rather than living in memory.",
+              }),
+            ),
+          ),
+        ).toBe(false);
+      } finally {
+        builder.close();
+      }
+
+      const recalled = await openSession();
+      try {
+        await recalled.request(toolCall(1, "surface", { set: PROBE_ID }));
+        const mine = ((await recalled.request(listTools(2)))?.result?.tools ?? []).find(
+          (tool) => tool.name === "mine",
+        );
+        expect(mine?.inputSchema?.properties?.name?.default).toBe("exploit-developer");
+        expect(mine?.inputSchema?.properties?.name?.description).toBe("Which agent to read.");
+        expect(textOf(await recalled.request(toolCall(3, "mine", {})))).toContain(
+          "# Agent: exploit-developer",
+        );
+      } finally {
+        recalled.close();
+      }
+    } finally {
+      cleanupProbe();
+    }
+  });
+});
