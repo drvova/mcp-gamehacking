@@ -83,6 +83,7 @@ async function buildIndex(): Promise<Map<string, SkillIndex>> {
         `The skill archive is not present at ${DIRS.skills}. It ships with the repository ` +
           "but is excluded from sparse checkouts and CI runs, which are 19 GB smaller without it. " +
           "The agent, subagent, plugin and prompt tools do not depend on it.",
+        { cause: error },
       );
     }
     throw error;
