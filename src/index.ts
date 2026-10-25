@@ -11,7 +11,7 @@ import {
   getSessionProfile,
   resolveProfile,
   setSessionProfile,
-  shapeToolNames,
+  shapeTools,
 } from "./profiles/resolve.js";
 import { PROFILE_ID_MESSAGE, PROFILE_ID_PATTERN } from "./profiles/types.js";
 
@@ -394,9 +394,9 @@ const server = new McpServer(
   {
     instructions:
       "Knowledge base for game hacking and reverse engineering: 4,160 skills, 75 agents, 161 subagents, 114 plugins and 148 prompts, including full source archives for roughly 3,980 projects.\n\n" +
-      "The tool surface adapts to the calling model. Call `get_model_profile` before substantive work: it reports which profile governs this session, why it was selected, and the working guidance written for that model. A profile reorders and may narrow what `tools/list` presents, but it never removes capability — any tool remains callable by name.\n\n" +
-      "A model may define its own profile with `define_model_profile`, which persists it for later sessions, and select one with `set_model_profile`. Per-request `_meta.profile` or `_meta.model` overrides both for that call.\n\n" +
-      "Start with `search_skills` or `research_technique`, read the curated SKILL.md via `read_skill`, and treat `read_source` as an unedited archive dump: it is paginated and single projects can exceed 100,000 lines.",
+      "The tool surface is not fixed. A profile decides which tools you carry, in what order, and how each one is described to you, because models do not work equally well on the same set. The surface you start with is a seed: enough to orient, see every option, and then choose.\n\n" +
+      "Call `get_model_profile` to see which surface governs this session and why, `list_available_tools` to see everything the server registers, and `list_model_profiles` to see the surfaces already built. Take one with `set_model_profile`, or call `define_model_profile` to build your own — pick your tools, order them, and write the descriptions in the terms you work best in. Authored profiles persist for later sessions.\n\n" +
+      "Nothing is withheld by a profile: a tool it does not carry stays callable by name, so a narrow surface is a presentation choice, never a lost capability.",
   },
 );
 
@@ -1816,11 +1816,26 @@ for (const { singular, plural, dir } of componentTools) {
 /** Root that holds the archive data and the model-authored profiles. */
 const PROFILE_ROOT = ROOT;
 
-type ToolListResult = { tools: Array<{ name: string }> };
+type ToolListResult = { tools: Array<{ name: string; description?: string }> };
 type ToolListHandler = (
   request: unknown,
   extra: unknown,
 ) => ToolListResult | Promise<ToolListResult>;
+
+/**
+ * The SDK's own `tools/list` handler, kept so the catalogue stays readable even
+ * before any client has listed tools.
+ */
+let rawToolListHandler: ToolListHandler | null = null;
+
+/** Every registered tool, unshaped by any profile. */
+async function listRegisteredTools(): Promise<ToolListResult["tools"]> {
+  if (!rawToolListHandler) return [];
+  // The SDK validates the request before dispatching, so pass a well-formed one
+  // even though the handler itself ignores it.
+  const base = await rawToolListHandler({ method: "tools/list", params: {} }, {});
+  return base.tools;
+}
 
 /**
  * Re-present `tools/list` in the order and scope the active profile declares.
@@ -1844,6 +1859,7 @@ function installProfileAwareToolList(mcp: McpServer): boolean {
 
   const original = handlers.get("tools/list");
   if (typeof original !== "function") return false;
+  rawToolListHandler = original;
 
   protocol.removeRequestHandler("tools/list");
   mcp.server.setRequestHandler(ListToolsRequestSchema, async (request, extra) => {
@@ -1856,16 +1872,50 @@ function installProfileAwareToolList(mcp: McpServer): boolean {
     const base = await original(request, extra);
     const resolved = await resolveProfile(PROFILE_ROOT, { meta, clientName, session });
 
-    const byName = new Map(base.tools.map((tool) => [tool.name, tool]));
-    const shaped = shapeToolNames([...byName.keys()], resolved.profile)
-      .map((name) => byName.get(name))
-      .filter((tool) => tool !== undefined);
-
-    return { ...base, tools: shaped };
+    return { ...base, tools: shapeTools(base.tools, resolved.profile) };
   });
 
   return true;
 }
+
+server.tool(
+  "list_available_tools",
+  "List every tool the server registers, marking which ones the active profile carries. Nothing is withheld: a tool this profile omits is still callable by name, and can be added to a profile of your own.",
+  {},
+  async (_args, extra) => {
+    const meta = extra?._meta;
+    const clientName = server.server.getClientVersion()?.name ?? null;
+    const session = getSessionProfile();
+
+    const resolved = await resolveProfile(PROFILE_ROOT, { meta, clientName, session });
+    const all = await listRegisteredTools();
+    if (all.length === 0) {
+      return err("The tool catalogue is unavailable in this build.");
+    }
+
+    const carried = new Set(shapeTools(all, resolved.profile).map((tool) => tool.name));
+    const inProfile = all.filter((tool) => carried.has(tool.name));
+    const outside = all.filter((tool) => !carried.has(tool.name));
+
+    const render = (tools: ToolListResult["tools"]) =>
+      tools
+        .map((tool) => `- \`${tool.name}\`${tool.description ? ` — ${tool.description}` : ""}`)
+        .join("\n");
+
+    const rest = outside.length
+      ? `\n\n## Not carried by \`${resolved.profile.id}\` (${outside.length})\n` +
+        "These are registered and callable by name; the profile simply does not present them.\n\n" +
+        render(outside)
+      : "";
+
+    return ok(
+      `# Tool catalogue (${all.length} registered)\n\n` +
+        `Active profile \`${resolved.profile.id}\` carries ${inProfile.length} of them.\n\n` +
+        `## Carried by \`${resolved.profile.id}\` (${inProfile.length})\n${render(inProfile)}${rest}\n\n` +
+        "To change what you carry, use `set_model_profile` or build a surface with `define_model_profile`.",
+    );
+  },
+);
 
 server.tool(
   "list_model_profiles",
@@ -1983,6 +2033,12 @@ server.tool(
       .optional()
       .describe("When set, only these tools are listed (they remain callable regardless)"),
     tool_exclude: z.array(z.string()).optional().describe("Tools omitted from the listing"),
+    tool_descriptions: z
+      .record(z.string(), z.string())
+      .optional()
+      .describe(
+        "Per-tool description overrides, keyed by tool name. Write the wording you work best with instead of the server's default.",
+      ),
     workflow: z.array(z.string()).optional().describe("Ordered working steps for this model"),
   },
   async (args) => {
@@ -1998,6 +2054,7 @@ server.tool(
           order: args.tool_order ?? [],
           include: args.tool_include,
           exclude: args.tool_exclude ?? [],
+          descriptions: args.tool_descriptions ?? {},
         },
         workflow: args.workflow ?? [],
       });

@@ -104,34 +104,52 @@ export async function resolveProfile(
   return { profile: fallback, source: "default", matched: null };
 }
 
-/**
- * Reorder and filter tool names for a profile.
- *
- * Names that no longer exist are ignored, and a profile whose `include` list
- * matches nothing falls back to the full list: a mistake in a profile must
- * never present an empty tool surface.
- */
-export function shapeToolNames(names: string[], profile: ModelProfile): string[] {
-  const available = new Set(names);
-  const { include, exclude, order } = profile.tools;
+/** The minimum a tool needs to expose for shaping. */
+export type ShapeableTool = { name: string; description?: string };
 
-  let shaped = names;
+/**
+ * Apply a profile to the registered tools: select, order, and re-word.
+ *
+ * Names the profile mentions but that no longer exist are ignored, and a
+ * profile whose `include` list matches nothing falls back to the full set: a
+ * mistake in a profile must never present an empty tool surface.
+ */
+export function shapeTools<T extends ShapeableTool>(tools: T[], profile: ModelProfile): T[] {
+  const available = new Set(tools.map((tool) => tool.name));
+  const { include, exclude, order, descriptions } = profile.tools;
+
+  let shaped = tools;
   if (include && include.length > 0) {
-    const kept = include.filter((name) => available.has(name));
-    if (kept.length > 0) shaped = kept;
+    const kept = new Set(include.filter((name) => available.has(name)));
+    if (kept.size > 0) shaped = shaped.filter((tool) => kept.has(tool.name));
   }
 
   const excluded = new Set(exclude);
-  const filtered = shaped.filter((name) => !excluded.has(name));
-  if (filtered.length === 0) return names;
+  const filtered = shaped.filter((tool) => !excluded.has(tool.name));
+  const selected = filtered.length > 0 ? filtered : tools;
 
-  const rank = new Map(order.map((name, index) => [name, index]));
-  const ranked: string[] = [];
-  const rest: string[] = [];
-  for (const name of filtered) {
-    if (rank.has(name)) ranked.push(name);
-    else rest.push(name);
-  }
-  ranked.sort((a, b) => (rank.get(a) ?? 0) - (rank.get(b) ?? 0));
-  return [...ranked, ...rest];
+  // Rank: an explicit `order` wins for the tools it names; otherwise the
+  // `include` list's own order is the author's declared preference; otherwise
+  // registration order, which the stable sort below preserves.
+  const orderRank = new Map(order.map((name, index) => [name, index]));
+  const includeRank = new Map((include ?? []).map((name, index) => [name, index]));
+  const keyOf = (name: string): [number, number] => {
+    const explicit = orderRank.get(name);
+    if (explicit !== undefined) return [0, explicit];
+    const included = includeRank.get(name);
+    if (included !== undefined) return [1, included];
+    return [2, 0];
+  };
+
+  const ranked = [...selected].sort((a, b) => {
+    const [aTier, aRank] = keyOf(a.name);
+    const [bTier, bRank] = keyOf(b.name);
+    return aTier === bTier ? aRank - bRank : aTier - bTier;
+  });
+
+  // Re-word for this model. A tool with no override keeps the server's wording.
+  return ranked.map((tool) => {
+    const override = descriptions[tool.name];
+    return override === undefined ? tool : { ...tool, description: override };
+  });
 }

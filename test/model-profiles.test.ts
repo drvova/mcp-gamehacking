@@ -14,8 +14,25 @@ import {
   wasRefused,
 } from "./helpers/mcp.js";
 
-/** Registration order with the neutral profile. */
-const DEFAULT_SURFACE = [
+/**
+ * The seed surface an unrecognised caller starts on.
+ *
+ * This is deliberately not the whole catalogue: a base that fits no model in
+ * particular fits every model badly. The complete set is discoverable via
+ * `list_available_tools` and selectable with the `full` profile.
+ */
+const SEED_SURFACE = [
+  "get_model_profile",
+  "list_model_profiles",
+  "list_available_tools",
+  "set_model_profile",
+  "define_model_profile",
+  "search_skills",
+  "read_skill",
+];
+
+/** Every tool the server registers, in registration order. */
+const FULL_CATALOG = [
   "research_technique",
   "analyze_project",
   "get_agent_briefing",
@@ -43,6 +60,7 @@ const DEFAULT_SURFACE = [
   "read_plugin",
   "list_prompts",
   "read_prompt",
+  "list_available_tools",
   "list_model_profiles",
   "get_model_profile",
   "set_model_profile",
@@ -54,6 +72,7 @@ const PROFILE_TOOLS = [
   "get_model_profile",
   "set_model_profile",
   "define_model_profile",
+  "list_available_tools",
 ];
 
 const PROBE_ID = "test-probe-profile";
@@ -73,13 +92,40 @@ beforeAll(() => {
 afterEach(cleanupProbe);
 
 describe("model profile surface", () => {
-  it("presents the unchanged surface to an unrecognised client", async () => {
+  it("presents a seed surface, not the whole catalogue, to an unrecognised client", async () => {
     const names = toolNames(
       (await callServer([listTools(1)], { clientName: "unknown-client" })).get(1),
     );
 
-    expect(names).toEqual(DEFAULT_SURFACE);
+    expect(names).toEqual(SEED_SURFACE);
     for (const tool of PROFILE_TOOLS) expect(names).toContain(tool);
+    expect(names.length).toBeLessThan(FULL_CATALOG.length);
+  });
+
+  it("keeps every tool reachable from the seed, since a profile only shapes presentation", async () => {
+    // The seed carries a fraction of the catalogue. Every tool it omits must
+    // still work by name, so a narrow surface never costs a capability.
+    const omitted = FULL_CATALOG.filter((name) => !SEED_SURFACE.includes(name));
+    expect(omitted.length).toBeGreaterThan(0);
+
+    const responses = await callServer([
+      toolCall(1, "skill_stats"),
+      toolCall(2, "get_file_tree", { name: "ags-kdmapper-1909", max_entries: 10 }),
+    ]);
+
+    expect(wasRefused(responses.get(1))).toBe(false);
+    expect(textOf(responses.get(1))).toMatch(/\*\*Total:\*\*/);
+    expect(wasRefused(responses.get(2))).toBe(false);
+  });
+
+  it("publishes the whole catalogue and marks what the active profile carries", async () => {
+    const responses = await callServer([toolCall(1, "list_available_tools")]);
+    const catalog = textOf(responses.get(1));
+
+    for (const name of FULL_CATALOG) expect(catalog).toContain(`\`${name}\``);
+    expect(catalog).toContain(`(${FULL_CATALOG.length} registered)`);
+    expect(catalog).toContain(`(${SEED_SURFACE.length})`);
+    expect(catalog).toMatch(/callable by name/);
   });
 
   it("resolves a profile from the reported client name", async () => {
@@ -94,6 +140,80 @@ describe("model profile surface", () => {
       const responses = await callServer([toolCall(1, "get_model_profile")], { clientName });
       expect(profileIdOf(responses.get(1))).toBe(expected);
     }
+  });
+});
+
+describe("per-tool wording", () => {
+  it("words a shared tool differently per profile, and leaves unoverridden ones alone", async () => {
+    const responses = await callServer([
+      listTools(1, { profile: "claude" }),
+      listTools(2, { profile: "gpt" }),
+      listTools(3, { profile: "full" }),
+    ]);
+
+    const described = (index: number) => {
+      const tools = responses.get(index)?.result?.tools;
+      return new Map(
+        (Array.isArray(tools) ? tools : []).map((tool) => [
+          String(tool.name),
+          String(tool.description ?? ""),
+        ]),
+      );
+    };
+
+    const claude = described(1);
+    const gpt = described(2);
+    const full = described(3);
+
+    // Both carry read_source; each is told about it in its own terms.
+    expect(claude.get("read_source")).toBeTruthy();
+    expect(gpt.get("read_source")).toBeTruthy();
+    expect(claude.get("read_source")).not.toBe(gpt.get("read_source"));
+
+    // `full` declares no overrides, so it shows the server's own wording.
+    expect(full.get("read_source")).not.toBe(claude.get("read_source"));
+
+    // gpt re-words search_skills; claude does not, so no override leaked.
+    expect(gpt.get("search_skills")).not.toBe(full.get("search_skills"));
+    expect(claude.get("search_skills")).toBe(full.get("search_skills"));
+  });
+
+  it("lets a model author the wording of its own surface", async () => {
+    const probe = cleanupProbe();
+    try {
+      const created = await callServer([
+        toolCall(1, "define_model_profile", {
+          id: PROBE_ID,
+          label: "Wording Probe",
+          description: "Temporary profile used to prove authored wording",
+          guidance:
+            "This profile exists only to prove that a model can write the descriptions it reads. It must never survive a test run.",
+          tool_include: ["skill_stats", "search_skills"],
+          tool_descriptions: { search_skills: "PROBE WORDING: one distinctive word." },
+        }),
+      ]);
+      expect(wasRefused(created.get(1))).toBe(false);
+
+      const onDisk = JSON.parse(readFileSync(probe, "utf8"));
+      expect(onDisk.tools?.descriptions?.search_skills).toContain("PROBE WORDING");
+
+      const session = await openSession();
+      try {
+        await session.request(toolCall(1, "set_model_profile", { id: PROBE_ID }));
+        const listing = await session.request(listTools(2));
+
+        const tools = listing?.result?.tools ?? [];
+        expect(tools.map((tool) => tool.name)).toEqual(["skill_stats", "search_skills"]);
+
+        const described = tools.find((tool) => tool.name === "search_skills");
+        expect(String(described?.description ?? "")).toContain("PROBE WORDING");
+      } finally {
+        session.close();
+      }
+    } finally {
+      cleanupProbe();
+    }
+    expect(existsSync(probe)).toBe(false);
   });
 });
 
@@ -112,9 +232,9 @@ describe("per-request overrides", () => {
       "list_skills",
       "get_file_tree",
     ]);
-    expect(toolNames(responses.get(2))).toEqual(DEFAULT_SURFACE);
+    expect(toolNames(responses.get(2))).toEqual(SEED_SURFACE);
     // An unknown id must fall through rather than blank the surface.
-    expect(toolNames(responses.get(3))).toEqual(DEFAULT_SURFACE);
+    expect(toolNames(responses.get(3))).toEqual(SEED_SURFACE);
   });
 
   it("honours _meta.model", async () => {
@@ -125,6 +245,13 @@ describe("per-request overrides", () => {
 
     expect(profileIdOf(responses.get(1))).toBe("claude");
     expect(profileIdOf(responses.get(2))).toBe("gpt");
+  });
+
+  it("lets a caller take the whole catalogue instead of the seed", async () => {
+    const responses = await callServer([listTools(1, { profile: "full" })]);
+
+    // Nothing is lost by seeding: the complete surface is one request away.
+    expect(toolNames(responses.get(1))).toEqual(FULL_CATALOG);
   });
 });
 
@@ -147,7 +274,7 @@ describe("session override", () => {
       expect(textOf(cleared)).toContain("cleared");
 
       const restored = await session.request(listTools(4));
-      expect(toolNames(restored)).toEqual(DEFAULT_SURFACE);
+      expect(toolNames(restored)).toEqual(SEED_SURFACE);
     } finally {
       session.close();
     }
@@ -162,7 +289,7 @@ describe("session override", () => {
       expect(textOf(refused)).toMatch(/Unknown profile/);
 
       const listing = await session.request(listTools(2));
-      expect(toolNames(listing)).toEqual(DEFAULT_SURFACE);
+      expect(toolNames(listing)).toEqual(SEED_SURFACE);
     } finally {
       session.close();
     }

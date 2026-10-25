@@ -32,9 +32,15 @@ const MatchSchema = z.object({
 });
 
 /**
- * How a profile presents the tool surface. This shapes `tools/list` only:
- * a tool omitted here remains callable, so a wrong profile can never disable
- * a capability.
+ * How a profile presents the tool surface.
+ *
+ * A profile owns its surface rather than filtering a shared one: it decides
+ * which tools it carries, in what order, and — via `descriptions` — how each
+ * one is worded for the model that reads it. Two models that both need
+ * `read_source` may need to be told about it in different terms.
+ *
+ * This shapes `tools/list` only: a tool omitted here remains callable, so a
+ * wrong profile can never disable a capability.
  */
 const ToolsSchema = z.object({
   /** Preferred ordering; listed tools come first in this order. */
@@ -43,6 +49,11 @@ const ToolsSchema = z.object({
   include: z.array(z.string().min(1)).optional(),
   /** Removed from the listing. */
   exclude: z.array(z.string().min(1)).default([]),
+  /**
+   * Per-tool description overrides, keyed by tool name. A model reads the
+   * wording written for it instead of the server's generic one.
+   */
+  descriptions: z.record(z.string(), z.string().min(1)).default({}),
 });
 
 export const ModelProfileSchema = z.object({
@@ -53,7 +64,7 @@ export const ModelProfileSchema = z.object({
   label: z.string().min(1),
   description: z.string().min(1),
   match: MatchSchema.default({ clientNames: [], models: [] }),
-  tools: ToolsSchema.default({ order: [], exclude: [] }),
+  tools: ToolsSchema.default({ order: [], exclude: [], descriptions: {} }),
   /** Model-specific operating guidance returned by get_model_profile. */
   guidance: z.string().min(80),
   /** Ordered working steps for this model. */

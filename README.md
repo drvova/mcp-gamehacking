@@ -104,7 +104,7 @@ MCP (Model Context Protocol) server for game hacking & reverse engineering. A st
 
 ---
 
-## Tools (31 total)
+## Tools (32 total)
 
 ### Workflow Tools
 
@@ -141,18 +141,50 @@ MCP (Model Context Protocol) server for game hacking & reverse engineering. A st
 | `get_model_profile`    | Report the profile governing this session, and why   |
 | `set_model_profile`    | Select a profile for the session, or `auto` to clear |
 | `define_model_profile` | Author and persist a new profile                     |
+| `list_available_tools` | Show every registered tool, carried or not           |
 
 ---
 
 ## Model Profiles
 
-Models differ in which tools they drive well. The server resolves a profile per
-session and uses it to order — and optionally narrow — the tool listing, and to
-return guidance written for that model.
+Models do not work equally well on the same tools. A model that reasons well
+over a large surface and a small local model that needs four unambiguous
+single-argument tools are not served by the same list, so the server does not
+impose one.
 
-`tools/list` is shaped by the active profile; **calling is never restricted**.
-A tool omitted from the listing remains callable by name, so a wrong or hostile
-profile can only affect presentation, never capability.
+A profile owns a surface. It decides:
+
+- **which** tools it carries
+- **what order** they appear in
+- **how each one is described** — the wording a model actually reads
+
+That last point is why this is not a filter over a shared catalogue. Two models
+can both carry `read_source` and still need to be told about it in different
+terms.
+
+### There is no generic base
+
+An unrecognised caller gets a **seed**, not everything. A surface that fits no
+model in particular fits every model badly, so the seed carries seven tools:
+enough to orient, see every option, and then choose.
+
+```
+get_model_profile      which surface governs this session, and why
+list_model_profiles    the surfaces already built
+list_available_tools   every registered tool, carried or not
+set_model_profile      take one of the above
+define_model_profile   build your own
+search_skills          \
+read_skill             / enough to do real work while deciding
+```
+
+A caller that wants the whole catalogue asks for it: the `full` profile carries
+all 32 tools with the server's own wording.
+
+**Nothing is withheld by a profile.** A tool a profile does not carry remains
+callable by name. Omission is presentation, never permission, so a narrow or
+wrong profile cannot cost a capability — and `list_available_tools` always shows
+what exists.
 
 ### Resolution order
 
@@ -163,20 +195,27 @@ The first match wins:
 3. the session override set by `set_model_profile`
 4. `MCP_MODEL_PROFILE` or `MCP_MODEL` in the environment
 5. the client name reported at initialize, matched against `clientNames`
-6. `default` — the full, unshaped surface
+6. `default` — the seed
 
-An unrecognised caller always lands on `default`, which presents every tool in
-registration order.
+An unrecognised caller always lands on the seed, never on an unfitted
+everything-surface.
 
 ### Built-in profiles
 
-`default`, `claude`, `gpt`, `gemini`, `compact` and `local`. The last two
-demonstrate narrowing: `compact` lists five tools, `local` lists four.
+| Profile   | Surface                                        |
+| --------- | ---------------------------------------------- |
+| `default` | the 7-tool seed                                |
+| `full`    | all 32, registration order, server wording     |
+| `claude`  | curated-first, with cross-check guidance       |
+| `gpt`     | short deterministic sequences, compact results |
+| `gemini`  | aggregation-first, per-claim attribution       |
+| `compact` | 5 tools, search weighted over reading          |
+| `local`   | 4 tools, single-argument, no composition       |
 
 ### Authoring a profile
 
-A model can write its own profile; it is stored in `model-profiles/<id>.json`
-and is available to later sessions:
+A model can build its own surface, including the wording it reads. It is stored
+in `model-profiles/<id>.json` and is available to later sessions:
 
 ```jsonc
 // define_model_profile
@@ -186,8 +225,11 @@ and is available to later sessions:
   "description": "When this profile fits",
   "guidance": "Model-specific operating guidance, at least 80 characters.",
   "models": ["my-model-name"],
-  "tool_order": ["search_skills", "read_skill"],
   "tool_include": ["search_skills", "read_skill"],
+  "tool_order": ["search_skills", "read_skill"],
+  "tool_descriptions": {
+    "search_skills": "One distinctive word beats a sentence.",
+  },
   "workflow": ["Search first.", "Then read."],
 }
 ```
@@ -309,7 +351,7 @@ Kernel exploit and driver development agent...
 
 ```
 mcp-gamehacking/
-+-- src/index.ts              # MCP server (31 tools)
++-- src/index.ts              # MCP server (32 tools)
 +-- src/profiles/             # Per-model profile layer
 +|   +-- types.ts              #   profile schema and id rules
 +|   +-- builtin.ts            #   built-in profiles
