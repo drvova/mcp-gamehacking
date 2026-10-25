@@ -3,7 +3,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { readdir, readFile, stat } from "fs/promises";
-import { join, resolve } from "path";
+import { dirname, join, resolve } from "path";
+import { fileURLToPath } from "url";
 import { createReadStream, readFileSync } from "fs";
 import { createInterface } from "readline";
 import { loadSurfaces, saveProfile, shippedIds } from "./profiles/registry.js";
@@ -16,7 +17,17 @@ import {
 import { ModelProfileSchema, PROFILE_ID_MESSAGE, PROFILE_ID_PATTERN } from "./profiles/types.js";
 import type { ModelProfile } from "./profiles/types.js";
 
-const ROOT = resolve(import.meta.dirname, "..");
+/**
+ * The package root, without `import.meta.dirname`.
+ *
+ * That property is Node 20.11+, and this package declares `engines: >=18`
+ * (the MCP SDK's own floor). Deriving it from `import.meta.url` keeps the
+ * declaration true rather than quietly requiring a newer runtime than the
+ * package says it needs.
+ */
+const HERE = dirname(fileURLToPath(import.meta.url));
+
+const ROOT = resolve(HERE, "..");
 const DIRS = {
   skills: join(ROOT, "skills"),
   agents: join(ROOT, "agents"),

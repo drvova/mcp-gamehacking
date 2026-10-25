@@ -79,3 +79,7 @@ Scope: Give the mcp-gamehacking MCP server a per-model tooling layer. A profile 
 - [x] G17: The design is data, not code: no shipped surface id is hardcoded, and a surface added as a file is live with no rebuild
       CHECK: node tools/checks/check.mjs data-driven
       EXPECT: gate-passed:data-driven
+
+- [x] G18: The declared runtime floor is honoured: no source or harness file uses an API newer than engines.node
+  CHECK: node tools/checks/check.mjs engines-honoured
+  EXPECT: gate-passed:engines-honoured

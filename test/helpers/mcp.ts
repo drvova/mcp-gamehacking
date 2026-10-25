@@ -1,9 +1,37 @@
 import { spawn } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
 
-export const ROOT = resolve(import.meta.dirname, "../..");
+/**
+ * A promise with its settle functions, without `Promise.withResolvers`.
+ *
+ * That helper is Node 22+, and this project declares `engines: >=18`. Using it
+ * in the harness meant the suite passed on a modern local Node and failed on
+ * the runner, which is the one place the declared floor should be exercised.
+ */
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+/**
+ * This module's directory, without `import.meta.dirname`.
+ *
+ * That property is Node 20.11+, and this package declares `engines: >=18`
+ * (the MCP SDK's own floor). Deriving it from `import.meta.url` keeps the
+ * declaration true rather than quietly requiring a newer runtime than the
+ * package says it needs.
+ */
+const HERE = dirname(fileURLToPath(import.meta.url));
+
+export const ROOT = resolve(HERE, "../..");
 export const SERVER = resolve(ROOT, "dist", "index.js");
 export const SKILLS_DIR = resolve(ROOT, "skills");
 export const PROFILES_DIR = resolve(ROOT, "model-profiles");
@@ -104,7 +132,7 @@ export function callServer(
   options: CallOptions = {},
 ): Promise<Map<number, Frame>> {
   const { clientName = "rstest", timeoutMs = 120_000 } = options;
-  const { promise, resolve: settle, reject } = Promise.withResolvers<Map<number, Frame>>();
+  const { promise, resolve: settle, reject } = deferred<Map<number, Frame>>();
 
   const child = spawn(process.execPath, [SERVER], {
     stdio: ["pipe", "pipe", "pipe"],
@@ -283,7 +311,7 @@ export async function openSession(options: CallOptions = {}): Promise<Session> {
     if (typeof id !== "number") {
       return Promise.reject(new Error("session requests need a numeric id"));
     }
-    const { promise, resolve, reject } = Promise.withResolvers<Frame>();
+    const { promise, resolve, reject } = deferred<Frame>();
     pending.set(id, resolve);
     failures.set(id, reject);
     child.stdin.write(`${JSON.stringify(outgoing)}\n`);

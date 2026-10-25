@@ -14,9 +14,37 @@
  */
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const ROOT = resolve(import.meta.dirname, "../..");
+/**
+ * A promise with its settle functions, without `Promise.withResolvers`.
+ *
+ * That helper is Node 22+, and this project declares `engines: >=18`. Using it
+ * in the harness meant the suite passed on a modern local Node and failed on
+ * the runner, which is the one place the declared floor should be exercised.
+ */
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+/**
+ * This module's directory, without `import.meta.dirname`.
+ *
+ * That property is Node 20.11+, and this package declares `engines: >=18`
+ * (the MCP SDK's own floor). Deriving it from `import.meta.url` keeps the
+ * declaration true rather than quietly requiring a newer runtime than the
+ * package says it needs.
+ */
+const HERE = dirname(fileURLToPath(import.meta.url));
+
+const ROOT = resolve(HERE, "../..");
 const SERVER = join(ROOT, "dist", "index.js");
 const PROFILES_DIR = join(ROOT, "model-profiles");
 const SKILLS_DIR = join(ROOT, "skills");
@@ -68,7 +96,7 @@ function pass(token) {
 
 /** Spawn the built server, send requests, and collect responses by id. */
 function callServer(requests, clientName = "gate-probe") {
-  const { promise, resolve: settle, reject } = Promise.withResolvers();
+  const { promise, resolve: settle, reject } = deferred();
 
   const child = spawn(process.execPath, [SERVER], {
     stdio: ["pipe", "pipe", "pipe"],
@@ -168,7 +196,7 @@ async function openSession(clientName = "gate-probe") {
   });
 
   const request = (outgoing) => {
-    const { promise, resolve } = Promise.withResolvers();
+    const { promise, resolve } = deferred();
     pending.set(outgoing.id, resolve);
     child.stdin.write(`${JSON.stringify(outgoing)}\n`);
     return promise;
@@ -409,6 +437,63 @@ const CHECKS = {
     assert(gptSearch !== fullSearch, "gpt's search_skills wording did not apply");
     assert(claudeSearch === fullSearch, "claude picked up another profile's search_skills wording");
     pass("descriptions-apply");
+  },
+
+  async "engines-honoured"() {
+    // The declared runtime floor must be true. A source or harness file that
+    // reaches for a newer API than package.json promises passes on a modern
+    // local Node and fails on the runner — which is exactly how this project
+    // shipped a `Promise.withResolvers` (Node 22) into a package declaring
+    // `engines: >=18`. This check makes that class of bug local, not remote.
+    const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
+    const raw = String(pkg.engines?.node ?? "");
+    const floor = Number.parseFloat(raw.replace(/[^0-9.]/g, ""));
+    assert(Number.isFinite(floor), `package.json declares no usable engines.node (got "${raw}")`);
+
+    // The table is data, read here rather than embedded: a list inside the
+    // check that consumes it would be found by the check's own scan.
+    const table = JSON.parse(
+      readFileSync(join(ROOT, "tools", "checks", "node-api-floors.json"), "utf8"),
+    );
+    const FLOORS = Object.entries(table.floors).map(([api, min]) => [
+      table.patterns[api] ?? api,
+      min,
+      api,
+    ]);
+
+    const walk = (dir) =>
+      readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) return entry.name === "node_modules" ? [] : walk(full);
+        return /\.(ts|mjs|js)$/.test(entry.name) ? [full] : [];
+      });
+
+    const files = [join(ROOT, "src"), join(ROOT, "test"), join(ROOT, "tools")]
+      .filter((dir) => existsSync(dir))
+      .flatMap(walk);
+    assert(files.length > 0, "found no source files to scan");
+
+    // Strip comments: prose naming an API is documentation, not a call.
+    const strip = (text) =>
+      text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+
+    const violations = [];
+    for (const [pattern, min, name] of FLOORS) {
+      if (min <= floor) continue;
+      for (const file of files) {
+        if (strip(readFileSync(file, "utf8")).includes(pattern)) {
+          violations.push(
+            `${name} (needs Node ${min}) in ${file.replace(ROOT, ".").replace(/\\/g, "/")}`,
+          );
+        }
+      }
+    }
+
+    assert(
+      violations.length === 0,
+      `declared engines.node is >=${floor}, but: ${violations.join("; ")}`,
+    );
+    pass("engines-honoured");
   },
 
   async "data-driven"() {

@@ -1,0 +1,27 @@
+{
+  "_comment": "Node APIs that raise the runtime floor. The engines-honoured gate reads this so the table is data rather than a list embedded in the check that consumes it.",
+  "floors": {
+    "Promise.withResolvers": 22,
+    "import.meta.dirname": 20.11,
+    "Array.prototype.toSorted": 20,
+    "Array.prototype.toReversed": 20,
+    "Array.prototype.toSpliced": 20,
+    "Object.groupBy": 21,
+    "Map.groupBy": 21,
+    "fs.glob": 22,
+    "structuredClone": 17,
+    "AbortSignal.timeout": 17.3
+  },
+  "patterns": {
+    "Promise.withResolvers": "Promise.withResolvers",
+    "import.meta.dirname": "import.meta.dirname",
+    "Array.prototype.toSorted": ".toSorted(",
+    "Array.prototype.toReversed": ".toReversed(",
+    "Array.prototype.toSpliced": ".toSpliced(",
+    "Object.groupBy": "Object.groupBy",
+    "Map.groupBy": "Map.groupBy",
+    "fs.glob": "fs.glob",
+    "structuredClone": "structuredClone",
+    "AbortSignal.timeout": "AbortSignal.timeout"
+  }
+}
