@@ -1,27 +1,28 @@
 {
   "id": "default",
   "label": "Seed",
-  "description": "One tool: the catalogue and the means to compose your own surface from it. Nothing is chosen for you.",
+  "description": "One tool. Call it with no arguments to see everything that exists, then compose your own surface from it.",
   "match": {
     "clientNames": [],
     "models": []
   },
   "tools": {
-    "order": [
+    "include": [
       "surface"
     ],
-    "include": [
+    "order": [
       "surface"
     ],
     "exclude": [],
     "descriptions": {
-      "surface": "Start here, and the only tool you begin with. No arguments reports where you are and lists everything that exists. `pick` composes your own surface from those tools — that is the point: not every model works well on the same set, so this server does not choose one for you. `set` takes a ready-made surface; `list` enumerates."
+      "surface": "The only tool you begin with, and the only one that manages your tooling. No arguments reports where you are and lists every tool that exists. `pick` builds your own surface from that list — this is the intended path, because models do not perform equally on the same tools, so a working set chosen for you would fit you badly. `save` writes your surface down so later sessions start there. `list` enumerates what you carry."
     }
   },
-  "guidance": "You begin with one tool and no working set, deliberately. Models do not perform equally on the same tools, so a base set chosen for you would fit you badly. This server gives you the catalogue and the means to compose; the choosing is yours.\n\nCall `surface` with no arguments: it reports the whole catalogue, so you can see every tool that exists with the wording written for you. Then take what you actually want:\n\n- `surface` with `pick: [...]` composes a surface from the names you choose, for this session. This is the intended path.\n- `surface` with `set: \"<id>\"` takes one of the ready-made surfaces instead, if one fits.\n- `define_model_profile` writes a named surface that persists and can auto-select itself in later sessions. It is not in your seed, but it is registered and callable by name.\n\nNothing is withheld in the meantime. Every registered tool is callable by name even when your surface does not present it, so you can finish a task first and compose your surface afterwards.",
+  "guidance": "You begin with one tool and no working set, deliberately. Models do not perform equally on the same tools, so a base set chosen for you would fit you badly. This server gives you the catalogue and the means to compose; the choosing is yours.\n\nCall `surface` with no arguments. It reports the whole catalogue — every tool that exists, each with the wording written for you — and the delta between what you carry and what you do not.\n\nThen build your surface:\n\n- `surface` with `pick: [...]` composes your working set from the names you choose, for this session. This is the path. Nothing is chosen for you, here or anywhere else.\n- `surface` with `save: \"<id>\"` writes that surface down, so it persists and can auto-select itself in later sessions. The guidance you write for it is returned to you on every future `surface` call.\n- `surface` with `list: \"tools\"` shows the catalogue again with descriptions; `list: \"surfaces\"` shows what you have saved.\n\nNothing is withheld while you decide. Every registered tool is callable by name even when your surface does not carry it, so you can finish a task first and shape your surface afterwards.",
   "workflow": [
-    "surface with no arguments to see where you are and what exists.",
-    "surface with pick to compose your own working set.",
-    "Work with what you chose; adjust with pick as the task changes."
+    "surface with no arguments to see the catalogue and where you are.",
+    "surface with pick to build your own working set.",
+    "surface with save to make it persist for later sessions.",
+    "Recompose with pick whenever the task changes shape."
   ]
 }

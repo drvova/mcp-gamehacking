@@ -424,7 +424,7 @@ const server = new McpServer(
   {
     instructions:
       "Knowledge base for game hacking and reverse engineering: 4,160 skills, 75 agents, 161 subagents, 114 plugins and 148 prompts, including full source archives for roughly 3,980 projects.\n\n" +
-      "The tool surface is not fixed, and it is not chosen for you. Models do not work equally well on the same tools, so no base set suits everyone; you start with one tool and no working set. Call `surface` with no arguments to see the whole catalogue, then compose your own surface with `pick` — or take a ready-made one with `set`, or write a durable one with `define_model_profile`.\n\n" +
+      "The tool surface is not fixed, and it is not chosen for you. Models do not work equally well on the same tools, so no base set suits everyone; you start with one tool and no working set. Call `surface` with no arguments to see every tool that exists, then build your own working set with `pick` and write it down with `save`.\n\n" +
       "Nothing is withheld in the meantime: a tool your surface does not carry stays callable by name, so a narrow surface is a presentation choice, never a lost capability.",
   },
 );
@@ -1911,7 +1911,7 @@ function installProfileAwareToolList(mcp: McpServer): boolean {
  * Compose an ad-hoc surface from chosen tool names.
  *
  * Session-scoped and never written to disk: `pick` is the fast path for "these
- * tools, now", while `define_model_profile` is the durable one. Unknown names
+ * tools, now", while `save` writes it down for later sessions. Unknown names
  * are reported rather than silently dropped, so a typo does not quietly produce
  * a smaller surface than the caller asked for.
  */
@@ -1946,8 +1946,8 @@ async function pickSurface(
       `You composed this surface yourself, from the catalogue, and it holds ${known.length} tools: ` +
       `${known.join(", ")}. It is session-scoped and nothing was written to disk.\n\n` +
       "Recompose it with `surface` and `pick` whenever the task changes shape — a surface is a working " +
-      "set, not a commitment. If it turns out to be right, `define_model_profile` writes it down so " +
-      "later sessions start there.",
+      "set, not a commitment. If it turns out to be right, `save` writes it down so later " +
+      "sessions start there.",
     tools: { include: known, order: known, exclude: [], descriptions: {} },
     workflow: [],
   });
@@ -2003,7 +2003,7 @@ async function renderSurfaces(activeId: string): Promise<string> {
 
   return (
     `# Surfaces (${profiles.size})\n\n${rows.join("\n")}${problems}\n\n${wiring}\n\n` +
-    "Compose your own with `surface` and `pick`, take one of these with `set`, or write a durable one with `define_model_profile`."
+    "Compose your own with `surface` and `pick`, or recall one you saved with `set`."
   );
 }
 
@@ -2031,7 +2031,7 @@ async function renderCatalogue(profile: ModelProfile, core: readonly string[]): 
     `# Tool catalogue (${all.length} registered)\n\n` +
     `\`${profile.id}\` carries ${inside.length} of them.\n\n` +
     `## Carried by \`${profile.id}\` (${inside.length})\n${render(inside)}${rest}\n\n` +
-    "Compose your own set from these with `surface` and `pick`, take one of the ready-made surfaces with `set`, or write a durable one with `define_model_profile`."
+    "Build your working set from these with `surface` and `pick`, then keep it with `save`."
   );
 }
 
@@ -2080,40 +2080,102 @@ async function renderSurface(
   );
 }
 
+/**
+ * Persist the surface the caller built, so a later session can start there.
+ *
+ * There is no shipped catalogue of surfaces to choose from: the model composes
+ * its own with `pick` and this writes that down. The tools come from what was
+ * composed, not from a parameter, because a surface is something built and then
+ * remembered — not a form to fill in.
+ */
+async function saveSurface(
+  id: string,
+  guidance: string | undefined,
+  current: ModelProfile,
+  core: readonly string[],
+): Promise<{ failure: string } | { profile: ModelProfile; replaced: boolean }> {
+  const { profiles } = await loadSurfaces(PROFILE_ROOT, { fresh: true });
+  const replaced = profiles.has(id);
+
+  const tools = shapeTools(await listRegisteredTools(), current, core)
+    .map((tool) => tool.name)
+    .filter((name) => name !== "");
+
+  const parsed = ModelProfileSchema.safeParse({
+    id,
+    label: id,
+    description: `Saved by the model: ${tools.length} tools.`,
+    match: { clientNames: [], models: [] },
+    tools: {
+      include: tools,
+      order: tools,
+      exclude: [],
+      descriptions: current.tools.descriptions,
+    },
+    guidance:
+      guidance ??
+      `You saved this surface yourself and it holds ${tools.length} tools: ${tools.join(", ")}.\n\n` +
+        "It is yours to change. Recompose with `pick` and save again under the same id whenever " +
+        "the task changes shape; nothing here was chosen for you.",
+    workflow: current.workflow,
+  });
+
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    return { failure: `${issue?.path.join(".") || "profile"}: ${issue?.message}` };
+  }
+
+  try {
+    await saveProfile(PROFILE_ROOT, parsed.data);
+  } catch (error) {
+    return { failure: error instanceof Error ? error.message : String(error) };
+  }
+  return { profile: parsed.data, replaced };
+}
+
 server.tool(
   "surface",
-  "Your tool surface. With no arguments it reports which surface governs this session, why, what it carries, and what it does not. `pick` composes your own surface from the catalogue, `set` takes a ready-made one, `list` enumerates.",
+  "Your tooling, and the only tool that manages it. No arguments reports where you are and lists every tool that exists. `pick` builds your own surface from that list, `save` writes it down for later sessions, `set` recalls one, `list` enumerates.",
   {
     list: z
-      .enum(["surfaces", "tools"])
+      .enum(["tools", "surfaces"])
       .optional()
-      .describe("Enumerate the available surfaces, or every registered tool with its description"),
+      .describe("Every registered tool with its description, or the surfaces you have saved"),
     pick: z
       .array(z.string())
       .optional()
       .describe(
-        "Compose your own surface from these tool names, for this session. This is the intended path: the server does not choose a working set for you.",
+        "Build your own surface from these tool names, for this session. This is the path: no working set is chosen for you, here or anywhere else.",
       ),
+    save: z
+      .string()
+      .regex(PROFILE_ID_PATTERN, PROFILE_ID_MESSAGE)
+      .optional()
+      .describe(
+        "Persist the surface you composed under this id, so later sessions can start there. Must match the id pattern.",
+      ),
+    guidance: z
+      .string()
+      .optional()
+      .describe("What you want to be told each time this saved surface loads"),
     set: z
       .string()
       .optional()
-      .describe(
-        "Take this ready-made surface id, or 'auto' to clear the override and fall back to detection",
-      ),
+      .describe("Take a surface you saved earlier, or 'auto' to clear the override"),
   },
-  async ({ list, pick, set }, extra) => {
+  async ({ list, pick, save, guidance, set }, extra) => {
     const meta = extra?._meta;
     const clientName = server.server.getClientVersion()?.name ?? null;
+    const notes: string[] = [];
 
     // Apply any change before resolving, so the report describes the surface the
     // caller now has rather than the one they just left.
-    let composed: string | null = null;
     if (pick !== undefined) {
       const outcome = await pickSurface(pick);
       if ("failure" in outcome) return err(outcome.failure);
       setSessionSurface({ kind: "picked", profile: outcome.profile });
       if (outcome.unknown.length) {
-        composed = `Ignored unknown tool names: ${outcome.unknown.join(", ")}.`;
+        notes.push(`Ignored unknown tool names: ${outcome.unknown.join(", ")}.`);
       }
     } else if (set !== undefined) {
       const failure = await applySurface(set);
@@ -2121,109 +2183,30 @@ server.tool(
     }
 
     const session = getSessionSurface();
-    const { profile, source, matched, core } = await resolveProfile(PROFILE_ROOT, {
-      meta,
-      clientName,
-      session,
-    });
+    const resolved = await resolveProfile(PROFILE_ROOT, { meta, clientName, session });
+    const { profile, core } = resolved;
+
+    if (save !== undefined) {
+      const outcome = await saveSurface(save, guidance, profile, core);
+      if ("failure" in outcome) return err(outcome.failure);
+      notes.push(
+        outcome.replaced
+          ? `Replaced the saved surface \`${save}\` with what you are carrying now.`
+          : `Saved as \`${save}\`. Recall it in a later session with \`surface\` and \`set: "${save}"\`.`,
+      );
+    }
 
     if (list === "surfaces") return ok(await renderSurfaces(profile.id));
     if (list === "tools") return ok(await renderCatalogue(profile, core));
 
-    const report = await renderSurface(profile, source, matched, clientName, core);
-    return ok(composed ? `${composed}\n\n${report}` : report);
-  },
-);
-
-server.tool(
-  "define_model_profile",
-  "Author a model profile and persist it, so it is available in later sessions. The profile shapes which tools are listed and what guidance `surface` reports.",
-  {
-    id: z.string().regex(PROFILE_ID_PATTERN, PROFILE_ID_MESSAGE).describe(PROFILE_ID_MESSAGE),
-    label: z.string().describe("Human-readable name"),
-    description: z.string().describe("One line describing when this profile fits"),
-    guidance: z.string().describe("Model-specific operating guidance, at least 80 characters"),
-    client_names: z
-      .array(z.string())
-      .optional()
-      .describe("Client names that auto-select this profile, matched case-insensitively"),
-    models: z.array(z.string()).optional().describe("Model names that auto-select this profile"),
-    tool_order: z.array(z.string()).optional().describe("Preferred tool ordering"),
-    tool_include: z
-      .array(z.string())
-      .optional()
-      .describe("When set, only these tools are listed (they remain callable regardless)"),
-    tool_exclude: z.array(z.string()).optional().describe("Tools omitted from the listing"),
-    tool_descriptions: z
-      .record(z.string(), z.string())
-      .optional()
-      .describe(
-        "Per-tool description overrides, keyed by tool name. Write the wording you work best with instead of the server's default.",
-      ),
-    workflow: z.array(z.string()).optional().describe("Ordered working steps for this model"),
-  },
-  async (args) => {
-    // A profile may choose to be narrow, but never inescapable. The surface core
-    // is added to any explicit include list and removed from any exclude list, so
-    // the saved file states what the model actually gets. `shapeTools` enforces
-    // the same rule at request time, which also covers hand-edited files.
-    const { manifest } = await loadSurfaces(PROFILE_ROOT);
-    const surfaceCore = manifest.surfaceCore;
-    const requested = args.tool_include;
-    const excluded = (args.tool_exclude ?? []).filter((name) => !surfaceCore.includes(name));
-    const droppedFromExclude = (args.tool_exclude ?? []).filter((name) =>
-      surfaceCore.includes(name),
+    const report = await renderSurface(
+      profile,
+      resolved.source,
+      resolved.matched,
+      clientName,
+      core,
     );
-    const added =
-      requested === undefined ? [] : surfaceCore.filter((name) => !requested.includes(name));
-    const include = requested === undefined ? undefined : [...requested, ...added];
-
-    let saved;
-    try {
-      saved = await saveProfile(PROFILE_ROOT, {
-        id: args.id,
-        label: args.label,
-        description: args.description,
-        guidance: args.guidance,
-        match: { clientNames: args.client_names ?? [], models: args.models ?? [] },
-        tools: {
-          order: args.tool_order ?? [],
-          include,
-          exclude: excluded,
-          descriptions: args.tool_descriptions ?? {},
-        },
-        workflow: args.workflow ?? [],
-      });
-    } catch (error) {
-      // A rejected profile is an expected outcome, not a server fault, so report
-      // the reason plainly instead of letting the handler throw.
-      const reason = error instanceof Error ? error.message : String(error);
-      return err(`Profile not saved: ${reason}`);
-    }
-
-    const where = `model-profiles/${saved.id}.json`;
-    const notes: string[] = [];
-    if (added.length) {
-      notes.push(
-        `Added the surface core, so this profile cannot trap a model: ${added
-          .map((name) => `\`${name}\``)
-          .join(", ")}. Without them a narrow surface cannot report or change itself.`,
-      );
-    }
-    if (droppedFromExclude.length) {
-      notes.push(
-        `Ignored the exclusion of ${droppedFromExclude
-          .map((name) => `\`${name}\``)
-          .join(", ")}: the surface core cannot be removed.`,
-      );
-    }
-
-    const surfaceNote = notes.length ? `\n\n${notes.join("\n\n")}` : "";
-
-    return ok(
-      `Profile \`${saved.id}\` saved to ${where}.${surfaceNote}\n\n` +
-        `Select it with \`surface\` and \`set\`, or let it auto-select by naming this client in \`client_names\` or the model in \`models\`.`,
-    );
+    return ok(notes.length ? `${notes.join("\n")}\n\n${report}` : report);
   },
 );
 

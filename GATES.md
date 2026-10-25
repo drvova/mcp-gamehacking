@@ -1,85 +1,69 @@
-# Gates: mcp-gamehacking per-model tool profiles
+# Gates: mcp-gamehacking — the model builds its own tooling
 
 Run every gate with `npm run test:gates`, or one with `npm run test:gate -- <name>`.
 The checks live in `tools/checks/check.mjs` and spawn the BUILT server, so run
 `npm run build` first.
 
-Three checks read the skill archive (19 GB): they skip with a loud notice when
+One check reads the skill archive (19 GB) and skips with a loud notice when
 `skills/` is absent, which is the normal case in CI. Set `GATES_REQUIRE_ARCHIVE=1`
 to make an absent archive a failure instead of a skip.
 
-OWNS: src/index.ts, src/profiles/**, profiles/**, test/**, tools/checks/**, model-profiles/**, README.md, GATES.md
+OWNS: src/index.ts, src/profiles/**, profiles/**, model-profiles/**, test/**, tools/checks/**, README.md, GATES.md
 
-Scope: Give the mcp-gamehacking MCP server a per-model tooling layer. A profile owns a surface: which tools it carries, their order, and the wording of each. There is no generic base — an unrecognised caller gets ONE tool that reports the catalogue and composes a surface from it, because no base set suits every model. All 29 registered tools stay reachable regardless of profile, so a profile is presentation and never permission. The whole surface-management layer is one tool. Existing tool behaviour is unchanged.
+Scope: A model builds its own tooling. The server ships no base of tools and no catalogue of surfaces to choose from — one seed tool, the whole tool catalogue, and the means to compose, keep and revise a surface from it. Nothing is pre-authored on the model's behalf.
 
-- [x] G1: The built server boots and exposes the profile entry point
-      CHECK: node tools/checks/check.mjs build-artifact
-      EXPECT: gate-passed:build-artifact
+- [x] G1: The built server boots, points a model at `surface`, and carries it in the seed
+  CHECK: node tools/checks/check.mjs build-artifact
+  EXPECT: gate-passed:build-artifact
 
-- [x] G2: An unrecognised caller gets a ONE-tool seed, and that tool shows the whole catalogue to choose from
-      CHECK: node tools/checks/check.mjs seed-surface
-      EXPECT: gate-passed:seed-surface
+- [x] G2: No pre-authored base ships: exactly one surface exists in the repository, and it is the seed
+  CHECK: node tools/checks/check.mjs no-pre-authored-base
+  EXPECT: gate-passed:no-pre-authored-base
 
-- [x] G3: The catalogue publishes every registered tool and agrees with what tools/list serves
-      CHECK: node tools/checks/check.mjs catalog-complete
-      EXPECT: gate-passed:catalog-complete
+- [x] G3: The seed is one tool, and its report shows the whole catalogue so there is something to choose from
+  CHECK: node tools/checks/check.mjs seed-surface
+  EXPECT: gate-passed:seed-surface
 
-- [x] G4: A profile owns how its tools are worded, and no override leaks into a profile that did not ask for it
-      CHECK: node tools/checks/check.mjs descriptions-apply
-      EXPECT: gate-passed:descriptions-apply
+- [x] G4: A model composes its own surface with `pick`: order honoured, typos reported, an empty pick refused
+  CHECK: node tools/checks/check.mjs compose-pick
+  EXPECT: gate-passed:compose-pick
 
-- [x] G5: Client identity resolves to the expected profile, with unknown as control
-      CHECK: node tools/checks/check.mjs detect-client
-      EXPECT: gate-passed:detect-client
+- [x] G5: The catalogue publishes every registered tool, agrees with what `tools/list` serves, and an omitted tool stays callable
+  CHECK: node tools/checks/check.mjs catalog-complete
+  EXPECT: gate-passed:catalog-complete
 
-- [x] G6: A per-request `_meta` override wins and reshapes the tool list
-      CHECK: node tools/checks/check.mjs meta-override
-      EXPECT: gate-passed:meta-override
+- [x] G6: A surface a model built is saved, survives the process, is recallable by name and by `_meta`, and can be revised
+  CHECK: node tools/checks/check.mjs save-recall
+  EXPECT: gate-passed:save-recall
 
-- [x] G7: Profile filtering is presentation-only; a tool the profile omits is still callable
-      CHECK: node tools/checks/check.mjs filter-advisory
-      EXPECT: gate-passed:filter-advisory
+- [x] G7: Hostile surface ids are refused and write nothing outside the profiles directory
+  CHECK: node tools/checks/check.mjs id-safety
+  EXPECT: gate-passed:id-safety
 
-- [x] G8: A model-authored profile persists, including its own tool wording, and a new process can select it
-      CHECK: node tools/checks/check.mjs author-profile
-      EXPECT: gate-passed:author-profile
+- [x] G8: Every surface carries the core, so none can trap a model, and composing or clearing keeps it
+  CHECK: node tools/checks/check.mjs surface-escape
+  EXPECT: gate-passed:surface-escape
 
-- [x] G9: Hostile profile ids are rejected and write nothing outside the profile directory
-      CHECK: node tools/checks/check.mjs id-safety
-      EXPECT: gate-passed:id-safety
+- [x] G9: Every client lands on the seed, proving detection hands no client a base set
+  CHECK: node tools/checks/check.mjs detect-client
+  EXPECT: gate-passed:detect-client
 
-- [x] G10: Built-in profiles carry distinct, substantive guidance rather than placeholders
-      CHECK: node tools/checks/check.mjs profile-content
-      EXPECT: gate-passed:profile-content
+- [x] G10: Omission is presentation only: a tool the seed does not carry still works when called by name
+  CHECK: node tools/checks/check.mjs filter-advisory
+  EXPECT: gate-passed:filter-advisory
 
-- [x] G11: Existing tool behaviour is unchanged end to end
-      CHECK: node tools/checks/check.mjs tool-smoke
-      EXPECT: gate-passed:tool-smoke
-
-- [x] G12: Type checking, linting and formatting all pass
-      CHECK: npm run check
-      EXPECT: success Format check passed
-
-- [x] G13: The repository test suite passes, including the profile tests
-      CHECK: npm test
-      EXPECT: "status": "pass"
-
-- [x] G14: This ledger passes its own lint
-      CHECK: node tools/checks/check.mjs ledger
-      EXPECT: gate-passed:ledger
-
-- [x] G15: Every profile carries the surface core, so no surface can trap a model, and switching out actually widens it
-      CHECK: node tools/checks/check.mjs surface-escape
-      EXPECT: gate-passed:surface-escape
-
-- [x] G16: A model composes its own surface with `pick`, and the seed is a single tool
-      CHECK: node tools/checks/check.mjs compose-pick
-      EXPECT: gate-passed:compose-pick
-
-- [x] G17: The design is data, not code: no shipped surface id is hardcoded, and a surface added as a file is live with no rebuild
-      CHECK: node tools/checks/check.mjs data-driven
-      EXPECT: gate-passed:data-driven
-
-- [x] G18: The declared runtime floor is honoured: no source or harness file uses an API newer than engines.node
+- [x] G11: The declared runtime floor is honoured: no source or harness file uses an API newer than engines.node
   CHECK: node tools/checks/check.mjs engines-honoured
   EXPECT: gate-passed:engines-honoured
+
+- [x] G12: The design is data, not code: no surface id is hardcoded, and a surface added as a file is live with no rebuild
+  CHECK: node tools/checks/check.mjs data-driven
+  EXPECT: gate-passed:data-driven
+
+- [x] G13: Existing tool behaviour is unchanged end to end
+  CHECK: node tools/checks/check.mjs tool-smoke
+  EXPECT: gate-passed:tool-smoke
+
+- [x] G14: This ledger passes its own lint
+  CHECK: node tools/checks/check.mjs ledger
+  EXPECT: gate-passed:ledger

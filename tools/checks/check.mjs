@@ -75,10 +75,10 @@ const SEED_SURFACE = readSurface(MANIFEST.seed).tools.include ?? [];
 
 /** Every tool the server registers, asked of the server itself. */
 async function fullCatalog() {
-  const responses = await callServer([listTools(1, { profile: "full" })]);
-  const names = toolNames(responses.get(1));
-  assert(names.length > 0, "the full surface presented no tools");
-  return names;
+  const responses = await callServer([toolCall(1, "surface", { list: "tools" })]);
+  const text = textOf(responses.get(1));
+  assert(text.includes("registered"), `catalogue did not render: ${text.slice(0, 160)}`);
+  return [...text.matchAll(/^- `([^`]+)`/gm)].map((match) => match[1]);
 }
 
 function fail(message) {
@@ -271,54 +271,72 @@ const CHECKS = {
     );
     const instructions = init.result.instructions;
     assert(typeof instructions === "string" && instructions.length > 100, "no usable instructions");
-    assert(
-      instructions.includes("`surface`"),
-      "instructions do not point a model at the tool catalogue",
-    );
+    assert(instructions.includes("`surface`"), "instructions do not point a model at `surface`");
 
     const tools = await callServer([listTools(1)]);
     const names = toolNames(tools.get(1));
-    assert(
-      names.includes("surface"),
-      `the seed does not carry \`surface\`, so it cannot compose anything: ${names.join(",")}`,
-    );
+    assert(names.includes("surface"), `the seed does not carry \`surface\`: ${names.join(",")}`);
     pass("build-artifact");
   },
 
+  async "no-pre-authored-base"() {
+    // The premise this design rests on: if a model builds its own tooling, there
+    // is nothing for the server to pre-author. Exactly one surface ships — the
+    // seed — and it is not a choice. Any further file here is the server
+    // guessing on the model's behalf, which is the thing being avoided.
+    const shipped = readdirSync(join(ROOT, "profiles"))
+      .filter((name) => name.endsWith(".json") && name !== "manifest.json")
+      .map((name) => name.replace(/\.json$/, ""));
+
+    assert(
+      shipped.length === 1 && shipped[0] === MANIFEST.seed,
+      `expected only the seed to ship, found: ${shipped.join(", ") || "none"}`,
+    );
+
+    const authored = existsSync(PROFILES_DIR)
+      ? readdirSync(PROFILES_DIR).filter((name) => name.endsWith(".json"))
+      : [];
+    assert(
+      authored.length === 0,
+      `surfaces are already saved before any check wrote one: ${authored.join(", ")}`,
+    );
+    pass("no-pre-authored-base");
+  },
+
   async "seed-surface"() {
-    // The seed is ONE tool. Not a base working set: there is no set that suits
-    // every model, so the only defensible floor is the tool that lets a caller
-    // see the catalogue and compose its own surface from it.
+    // One tool, and it must be sufficient to decide with: the report has to show
+    // the whole catalogue, or there is nothing to choose from.
     const responses = await callServer([listTools(1)], "totally-unknown-client");
     const names = toolNames(responses.get(1));
 
-    assert(
-      names.length === SEED_SURFACE.length,
-      `expected a ${SEED_SURFACE.length}-tool seed, got ${names.length}: ${names.join(",")}`,
-    );
+    assert(names.length === 1, `expected a one-tool seed, got ${names.length}: ${names.join(",")}`);
     assert(
       JSON.stringify(names) === JSON.stringify(SEED_SURFACE),
-      `unexpected seed surface: ${names.join(",")}`,
+      `seed does not match profiles/${MANIFEST.seed}.json: ${names.join(",")}`,
     );
 
-    // It must be sufficient to decide with: the report has to show the whole
-    // catalogue, or the model has nothing to choose from.
     const report = await callServer([toolCall(1, "surface")]);
     const text = textOf(report.get(1));
     assert(!report.get(1)?.result?.isError, "the seed tool failed");
     assert(/## Not carried \(\d+\)/.test(text), "the seed report does not show what exists");
 
     const catalog = await fullCatalog();
+    assert(catalog.length > 10, `catalogue looks empty: ${catalog.length} tools`);
     for (const name of catalog) {
       assert(text.includes(`\`${name}\``), `the seed report omits ${name} from the catalogue`);
     }
+
+    // The guidance is the first thing a model reads, so it must say how to build
+    // a surface rather than being a placeholder.
+    assert(text.includes("pick"), "the seed guidance does not mention composing a surface");
+    assert(text.length > 800, `the seed guidance is too thin to be useful (${text.length} chars)`);
     pass("seed-surface");
   },
 
   async "compose-pick"() {
-    // `pick` is the intended path: a model composes its own working set rather
-    // than being handed one. It must be session-scoped, must honour the caller's
-    // order, and must report a typo instead of silently shrinking the surface.
+    // `pick` is the path: a model builds its own working set rather than being
+    // handed one. It must honour the caller's order, report a typo instead of
+    // silently shrinking the surface, and refuse a pick naming nothing real.
     const session = await openSession();
     try {
       const picked = await session.request(
@@ -333,7 +351,6 @@ const CHECKS = {
         `pick did not honour the caller's order: ${listing.join(",")}`,
       );
 
-      // A typo must be reported, and the valid names must still take effect.
       const typo = await session.request(
         toolCall(3, "surface", { pick: ["search_skills", "no_such_tool"] }),
       );
@@ -344,7 +361,6 @@ const CHECKS = {
         `pick with a typo produced the wrong surface: ${after.join(",")}`,
       );
 
-      // Picking nothing usable must fail rather than leave an empty surface.
       const empty = await session.request(toolCall(5, "surface", { pick: ["nope"] }));
       assert(
         Boolean(empty?.error) || Boolean(empty?.result?.isError),
@@ -360,7 +376,6 @@ const CHECKS = {
     // Nothing may be silently unreachable: the catalogue must list every
     // registered tool and agree with what tools/list actually serves.
     const responses = await callServer([toolCall(1, "surface", { list: "tools" }), listTools(2)]);
-
     const catalog = textOf(responses.get(1));
     const listed = toolNames(responses.get(2));
 
@@ -377,12 +392,11 @@ const CHECKS = {
       "catalogue does not report how many the seed carries",
     );
 
-    // Every tool this profile omits must still be callable, so the omission is
-    // presentation only. The probes use tools whose data ships in every
-    // checkout, so this runs even where the skill archive is absent.
-    const omitted = (await fullCatalog()).filter((name) => !listed.includes(name));
+    const omitted = expected.filter((name) => !listed.includes(name));
     assert(omitted.length > 0, "the seed carries everything, so this check proves nothing");
 
+    // A tool the seed omits must still be callable, so omission is presentation
+    // only. The probes use data that ships in every checkout.
     const probe = await callServer([
       toolCall(1, "list_agents"),
       toolCall(2, "read_agent", { name: "exploit-developer" }),
@@ -394,49 +408,242 @@ const CHECKS = {
     pass("catalog-complete");
   },
 
-  async "descriptions-apply"() {
-    // A profile owns how its tools are WORDED, not just which it carries. Two
-    // models can both carry read_source and still need telling in different terms.
+  async "save-recall"() {
+    // A model builds a surface and keeps it. Persistence must survive the
+    // process, and the saved surface must be recallable by name and by `_meta`.
+    const id = "gate-probe-surface";
+    const path = cleanupProfile(id);
+
+    try {
+      const session = await openSession();
+      try {
+        await session.request(
+          toolCall(1, "surface", { pick: ["search_skills", "read_skill", "find_offset"] }),
+        );
+        const saved = await session.request(
+          toolCall(2, "surface", {
+            save: id,
+            guidance:
+              "Written by the gate harness to prove a model's own tooling persists across processes. Must never survive a run.",
+          }),
+        );
+        assert(!saved?.result?.isError, `save failed: ${textOf(saved).slice(0, 200)}`);
+      } finally {
+        session.close();
+      }
+
+      assert(existsSync(path), `the surface was not written to ${path}`);
+      const onDisk = JSON.parse(readFileSync(path, "utf8"));
+      assert(onDisk.id === id, "persisted id mismatch");
+      for (const tool of ["search_skills", "read_skill", "find_offset"]) {
+        assert(onDisk.tools.include.includes(tool), `saved surface lost ${tool}`);
+      }
+
+      // A brand-new process must see it, proving persistence rather than cache.
+      const reopened = await openSession();
+      try {
+        const listed = await reopened.request(toolCall(1, "surface", { list: "surfaces" }));
+        assert(textOf(listed).includes(id), "a fresh process did not list the saved surface");
+
+        const recalled = await reopened.request(toolCall(2, "surface", { set: id }));
+        assert(!recalled?.result?.isError, `set refused the saved surface: ${textOf(recalled)}`);
+
+        const names = toolNames(await reopened.request(listTools(3)));
+        for (const tool of ["search_skills", "read_skill", "find_offset"]) {
+          assert(names.includes(tool), `recalled surface is missing ${tool}`);
+        }
+      } finally {
+        reopened.close();
+      }
+
+      // `_meta.profile` must reach a saved surface too, without a session call.
+      const byMeta = await callServer([listTools(1, { profile: id })]);
+      const metaNames = toolNames(byMeta.get(1));
+      assert(metaNames.includes("find_offset"), "`_meta.profile` did not select the saved surface");
+
+      // Re-saving your own id updates that surface: it is how a model revises
+      // its tooling, and refusing would leave no way to change it.
+      const reviser = await openSession();
+      try {
+        await reviser.request(toolCall(1, "surface", { set: id }));
+        await reviser.request(toolCall(2, "surface", { pick: ["search_skills", "skill_stats"] }));
+        const updated = await reviser.request(
+          toolCall(3, "surface", {
+            save: id,
+            guidance:
+              "Re-saved by the gate harness to prove that a model can revise its own surface rather than being stuck with the first version.",
+          }),
+        );
+        assert(!updated?.result?.isError, `re-saving your own id failed: ${textOf(updated)}`);
+      } finally {
+        reviser.close();
+      }
+
+      const revised = JSON.parse(readFileSync(path, "utf8"));
+      assert(revised.tools.include.includes("skill_stats"), "the revision did not reach disk");
+
+      // Revising again must say it replaced rather than created, so a model can
+      // tell an update from a first save.
+      const again = await callServer([
+        toolCall(
+          1,
+          "surface",
+          {
+            save: id,
+            guidance:
+              "A third save under the same id, which must report that it replaced the previous version rather than claiming a fresh save.",
+          },
+          { profile: "picked" },
+        ),
+      ]);
+      assert(!again.get(1)?.result?.isError, "revising the surface failed");
+      assert(/Replaced/i.test(textOf(again.get(1))), "an update was not reported as a replacement");
+    } finally {
+      cleanupProfile(id);
+    }
+
+    assert(!existsSync(path), "cleanup failed to remove the probe surface");
+    pass("save-recall");
+  },
+
+  async "id-safety"() {
+    const hostile = [
+      "../escape",
+      "..",
+      "a/b",
+      "UPPER",
+      "has space",
+      ".hidden",
+      "trailing-",
+      "-leading",
+      "con",
+      "nul",
+    ];
+    const before = existsSync(PROFILES_DIR) ? readdirSync(PROFILES_DIR).length : 0;
+
+    const responses = await callServer(
+      hostile.map((candidate, index) =>
+        toolCall(index + 1, "surface", {
+          save: candidate,
+          guidance:
+            "A hostile identifier must be refused outright and must never reach the filesystem, whatever else this run does.",
+        }),
+      ),
+    );
+
+    for (let index = 0; index < hostile.length; index++) {
+      const response = responses.get(index + 1);
+      assert(
+        Boolean(response?.error) || Boolean(response?.result?.isError),
+        `hostile id "${hostile[index]}" was accepted`,
+      );
+    }
+
+    const after = existsSync(PROFILES_DIR) ? readdirSync(PROFILES_DIR).length : 0;
+    assert(after === before, `the profiles directory changed: ${before} -> ${after}`);
+    assert(!existsSync(join(PROFILES_DIR, "..", "escape.json")), "a file escaped the directory");
+    pass("id-safety");
+  },
+
+  async "surface-escape"() {
+    // A narrow surface must never be a trap: whatever it drops, it carries the
+    // tool that reports and changes it. Otherwise a model cannot see that a
+    // surface governs it, cannot discover the catalogue, and cannot leave.
+    const CORE = MANIFEST.surfaceCore;
+    const id = "gate-probe-escape";
+    const dropIn = join(ROOT, "profiles", `${id}.json`);
+    cleanupProfile(id);
+
+    try {
+      writeFileSync(
+        dropIn,
+        JSON.stringify({
+          id,
+          label: "Escape probe",
+          description: "Tries to drop the surface core; must never survive a run.",
+          match: { clientNames: [], models: [] },
+          tools: {
+            include: ["search_skills"],
+            order: ["search_skills"],
+            exclude: CORE,
+            descriptions: {},
+          },
+          guidance:
+            "This surface exists only to prove that the core cannot be dropped by a profile, hand-written or otherwise.",
+          workflow: [],
+        }),
+        "utf8",
+      );
+
+      const cases = [
+        [MANIFEST.seed, "the seed"],
+        [id, "a hand-written profile that excludes the core"],
+      ];
+
+      for (const [profileId, label] of cases) {
+        const responses = await callServer([listTools(1, { profile: profileId })]);
+        const names = toolNames(responses.get(1));
+        assert(names.length > 0, `${label} presented nothing`);
+        for (const tool of CORE) {
+          assert(names.includes(tool), `${label} cannot escape: it does not carry ${tool}`);
+        }
+      }
+
+      // The escape must work, not merely be advertised.
+      const session = await openSession();
+      try {
+        await session.request(toolCall(1, "surface", { pick: ["search_skills"] }));
+        const narrow = toolNames(await session.request(listTools(2)));
+        assert(narrow.includes("surface"), "a composed surface dropped the core");
+
+        await session.request(toolCall(3, "surface", { set: "auto" }));
+        const seed = toolNames(await session.request(listTools(4)));
+        assert(seed.includes("surface"), "clearing did not leave the core in place");
+      } finally {
+        session.close();
+      }
+    } finally {
+      rmSync(dropIn, { force: true });
+      cleanupProfile(id);
+    }
+
+    assert(!existsSync(dropIn), "cleanup failed to remove the escape probe");
+    pass("surface-escape");
+  },
+
+  async "detect-client"() {
+    // With nothing pre-authored there is nothing to match, so every client must
+    // land on the seed. This is the control proving detection is not secretly
+    // handing some clients a base set.
+    const clients = ["Claude Code", "gemini-cli", "ollama-runner", "some-gpt-client", "gate-probe"];
+
+    for (const clientName of clients) {
+      const responses = await callServer([toolCall(1, "surface")], clientName);
+      const id = profileIdOf(responses.get(1));
+      assert(id === MANIFEST.seed, `client "${clientName}" resolved to "${id}", expected the seed`);
+    }
+    pass("detect-client");
+  },
+
+  async "filter-advisory"() {
+    // A surface shapes presentation only: a tool it does not carry must still
+    // work when called by name. Probed with data that ships in every checkout.
     const responses = await callServer([
-      listTools(1, { profile: "claude" }),
-      listTools(2, { profile: "gpt" }),
-      listTools(3, { profile: "full" }),
+      listTools(1),
+      toolCall(2, "list_agents"),
+      toolCall(3, "read_agent", { name: "exploit-developer" }),
     ]);
 
-    const byProfile = (frame) => {
-      const tools = frame?.result?.tools;
-      assert(Array.isArray(tools), "tools/list returned no tools");
-      return new Map(tools.map((tool) => [tool.name, tool.description ?? ""]));
-    };
+    const listed = toolNames(responses.get(1));
+    for (const name of ["list_agents", "read_agent"]) {
+      assert(!listed.includes(name), `${name} should be omitted from the seed listing`);
+    }
 
-    const claude = byProfile(responses.get(1));
-    const gpt = byProfile(responses.get(2));
-    const full = byProfile(responses.get(3));
-
-    const claudeRead = claude.get("read_source") ?? "";
-    const gptRead = gpt.get("read_source") ?? "";
-    assert(claudeRead.length > 0 && gptRead.length > 0, "read_source missing from a profile");
-    assert(
-      claudeRead !== gptRead,
-      "two profiles describe read_source identically, so per-tool wording is not applied",
-    );
-
-    // `full` carries no overrides, so it must fall back to the server's wording.
-    const fullRead = full.get("read_source") ?? "";
-    assert(
-      fullRead !== claudeRead && fullRead !== gptRead,
-      "the unoverridden profile picked up another profile's wording",
-    );
-
-    // An override must never leak into a profile that did not ask for it.
-    // `gpt` re-words search_skills; `claude` does not, so claude must still be
-    // showing the server's own wording.
-    const gptSearch = gpt.get("search_skills") ?? "";
-    const claudeSearch = claude.get("search_skills") ?? "";
-    const fullSearch = full.get("search_skills") ?? "";
-    assert(gptSearch !== fullSearch, "gpt's search_skills wording did not apply");
-    assert(claudeSearch === fullSearch, "claude picked up another profile's search_skills wording");
-    pass("descriptions-apply");
+    assert(!responses.get(2)?.result?.isError, "an omitted tool was not callable");
+    assert(/Available agents \(\d+\)/.test(textOf(responses.get(2))), "no agent listing returned");
+    assert(!responses.get(3)?.result?.isError, "an omitted tool was not callable");
+    assert(textOf(responses.get(3)).includes("# Agent: exploit-developer"), "agent body missing");
+    pass("filter-advisory");
   },
 
   async "engines-honoured"() {
@@ -512,7 +719,7 @@ const CHECKS = {
     const shipped = readdirSync(join(ROOT, "profiles"))
       .filter((name) => name.endsWith(".json") && name !== "manifest.json")
       .map((name) => name.replace(/\.json$/, ""));
-    assert(shipped.length > 1, "expected several shipped surfaces");
+    assert(shipped.length >= 1, "no shipped surface found at all");
 
     // Strip comments so prose mentioning an id is not mistaken for logic.
     const stripComments = (text) =>
@@ -534,8 +741,10 @@ const CHECKS = {
 
     // A surface dropped in as a file must be live immediately, with the built
     // artifact untouched: that is what "the design is data" has to mean.
+    // A surface a model drops in belongs in the authored directory, which is
+    // read at runtime exactly like the shipped one.
     const probeId = "gate-probe-dropin";
-    const probePath = join(ROOT, "profiles", `${probeId}.json`);
+    const probePath = join(ROOT, "model-profiles", `${probeId}.json`);
     const builtBefore = readFileSync(SERVER, "utf8");
 
     try {
@@ -585,328 +794,6 @@ const CHECKS = {
     pass("data-driven");
   },
 
-  async "surface-escape"() {
-    // A narrow profile must never be a trap. Whatever a profile drops, it has to
-    // carry the tools that report and change the surface, or a model auto-detected
-    // into it cannot discover the catalogue or leave. That would be a capability
-    // loss caused by withheld knowledge, landing hardest on the smallest models.
-    const CORE = MANIFEST.surfaceCore;
-    const ids = [
-      "default",
-      "full",
-      "claude",
-      "gpt",
-      "gemini",
-      "compact",
-      "local",
-      // An authored profile that tries to exclude the core outright.
-      "gate-probe-trapped",
-    ];
-
-    const trapped = cleanupProfile("gate-probe-trapped");
-    try {
-      const created = await callServer([
-        toolCall(1, "define_model_profile", {
-          id: "gate-probe-trapped",
-          label: "Trap Probe",
-          description: "Attempts to exclude the surface core",
-          guidance:
-            "This profile exists only to prove that the surface core cannot be excluded, and must never survive a gate run.",
-          tool_include: ["search_skills"],
-          tool_exclude: CORE,
-        }),
-      ]);
-      assert(!created.get(1)?.result?.isError, "the trap probe profile was refused outright");
-
-      for (const id of ids) {
-        const responses = await callServer([listTools(1, { profile: id })]);
-        const names = toolNames(responses.get(1));
-        assert(names.length > 0, `profile ${id} presented nothing`);
-
-        for (const tool of CORE) {
-          assert(names.includes(tool), `profile "${id}" cannot escape: it does not carry ${tool}`);
-        }
-      }
-
-      // The escape must actually work, not merely be advertised: a model on the
-      // narrowest surface switches out and sees more.
-      const session = await openSession();
-      try {
-        await session.request(toolCall(1, "surface", { set: "local" }));
-        const narrow = toolNames(await session.request(listTools(2)));
-
-        await session.request(toolCall(3, "surface", { set: "full" }));
-        const wide = toolNames(await session.request(listTools(4)));
-
-        assert(
-          wide.length > narrow.length,
-          `switching from local (${narrow.length}) to full (${wide.length}) did not widen the surface`,
-        );
-      } finally {
-        session.close();
-      }
-    } finally {
-      cleanupProfile("gate-probe-trapped");
-    }
-
-    assert(!existsSync(trapped), "cleanup failed to remove the trap probe profile");
-    pass("surface-escape");
-  },
-
-  async "detect-client"() {
-    const cases = [
-      ["Claude Code", "claude"],
-      ["gemini-cli", "gemini"],
-      ["ollama-runner", "local"],
-      ["some-gpt-client", "gpt"],
-      ["totally-unknown-client", "default"],
-    ];
-
-    for (const [clientName, expected] of cases) {
-      const responses = await callServer([toolCall(1, "surface")], clientName);
-      const actual = profileIdOf(responses.get(1));
-      assert(
-        actual === expected,
-        `client "${clientName}" resolved to "${actual}", expected "${expected}"`,
-      );
-    }
-    pass("detect-client");
-  },
-
-  async "meta-override"() {
-    const overridden = await callServer([
-      listTools(1, { profile: "compact" }),
-      toolCall(2, "surface", {}, { model: "claude-opus-4" }),
-      listTools(3),
-    ]);
-
-    const compactNames = toolNames(overridden.get(1));
-    assert(
-      compactNames.length > 0 && compactNames.length < (await fullCatalog()).length,
-      `compact profile listed ${compactNames.length} tools, expected fewer than the full catalogue`,
-    );
-    assert(
-      JSON.stringify(compactNames) ===
-        JSON.stringify([
-          "search_skills",
-          "read_skill",
-          "skill_stats",
-          "list_skills",
-          "get_file_tree",
-          "surface",
-        ]),
-      `unexpected compact ordering: ${compactNames.join(",")}`,
-    );
-
-    assert(
-      profileIdOf(overridden.get(2)) === "claude",
-      "a _meta.model of claude-opus-4 did not select the claude profile",
-    );
-
-    const control = toolNames(overridden.get(3));
-    assert(
-      control.length === SEED_SURFACE.length,
-      `control request without _meta listed ${control.length} tools, expected the ${SEED_SURFACE.length}-tool seed`,
-    );
-    pass("meta-override");
-  },
-
-  async "filter-advisory"() {
-    // A profile shapes presentation only: a tool it does not list must still
-    // work when called by name. Probed with data that ships in every checkout.
-    const responses = await callServer([
-      listTools(1, { profile: "compact" }),
-      toolCall(2, "list_agents", {}, { profile: "compact" }),
-      toolCall(3, "read_agent", { name: "exploit-developer" }, { profile: "compact" }),
-    ]);
-
-    const listed = toolNames(responses.get(1));
-    for (const name of ["list_agents", "read_agent"]) {
-      assert(!listed.includes(name), `${name} should be omitted from the compact listing`);
-    }
-
-    assert(!responses.get(2)?.result?.isError, "an omitted tool was not callable");
-    assert(/Available agents \(\d+\)/.test(textOf(responses.get(2))), "no agent listing returned");
-    assert(!responses.get(3)?.result?.isError, "an omitted tool was not callable");
-    assert(textOf(responses.get(3)).includes("# Agent: exploit-developer"), "agent body missing");
-    pass("filter-advisory");
-  },
-
-  async "author-profile"() {
-    const id = "gate-probe-profile";
-    const path = cleanupProfile(id);
-
-    try {
-      const created = await callServer([
-        toolCall(1, "define_model_profile", {
-          id,
-          label: "Gate Probe",
-          description: "Temporary profile written by the gate harness",
-          guidance:
-            "This profile exists only to prove that a model can author and persist its own tooling. It narrows the listing to two tools and must never survive a gate run.",
-          client_names: [],
-          models: ["gate-probe-model"],
-          tool_include: ["skill_stats", "search_skills"],
-          tool_descriptions: {
-            search_skills: "GATE PROBE WORDING: one distinctive word, then stop.",
-          },
-          workflow: ["Check stats.", "Search."],
-        }),
-      ]);
-      const createText = textOf(created.get(1));
-      assert(
-        !created.get(1)?.result?.isError,
-        `define_model_profile failed: ${createText.slice(0, 200)}`,
-      );
-      assert(existsSync(path), `profile file was not written to ${path}`);
-
-      const onDisk = JSON.parse(readFileSync(path, "utf8"));
-      assert(onDisk.id === id, "persisted profile id mismatch");
-      assert(
-        onDisk.tools?.descriptions?.search_skills?.startsWith("GATE PROBE WORDING"),
-        "the authored tool description was not persisted",
-      );
-
-      // A brand-new process must see it, proving persistence rather than cache.
-      const session = await openSession();
-      try {
-        const listed = await session.request(toolCall(1, "surface", { list: "surfaces" }));
-        assert(
-          textOf(listed).includes(id),
-          "a fresh server process did not list the authored profile",
-        );
-
-        const selected = await session.request(toolCall(2, "surface", { set: id }));
-        assert(
-          !selected?.result?.isError,
-          `surface refused the authored profile: ${textOf(selected).slice(0, 160)}`,
-        );
-
-        const listing = await session.request(listTools(3));
-        const names = toolNames(listing);
-        // The author's order first, then the surface core the server guarantees.
-        assert(
-          JSON.stringify(names) === JSON.stringify(["skill_stats", "search_skills", "surface"]),
-          `session override did not reshape the listing: ${names.join(",")}`,
-        );
-
-        // The model's own wording must reach the listing, not just the disk.
-        const described = (listing?.result?.tools ?? []).find(
-          (tool) => tool.name === "search_skills",
-        );
-        assert(
-          String(described?.description ?? "").startsWith("GATE PROBE WORDING"),
-          "the authored description did not reach tools/list",
-        );
-      } finally {
-        session.close();
-      }
-    } finally {
-      cleanupProfile(id);
-    }
-
-    assert(!existsSync(path), "cleanup failed to remove the probe profile");
-    pass("author-profile");
-  },
-
-  async "id-safety"() {
-    const hostile = [
-      "../escape",
-      "..",
-      "a/b",
-      "UPPER",
-      "has space",
-      ".hidden",
-      "trailing-",
-      "-leading",
-      "con",
-      "nul",
-    ];
-    const before = existsSync(PROFILES_DIR) ? readdirSync(PROFILES_DIR).length : 0;
-
-    const responses = await callServer(
-      hostile.map((candidate, index) =>
-        toolCall(index + 1, "define_model_profile", {
-          id: candidate,
-          label: "Hostile",
-          description: "Should never be written",
-          guidance:
-            "A hostile identifier must be refused outright and must never reach the filesystem.",
-        }),
-      ),
-    );
-
-    for (let index = 0; index < hostile.length; index++) {
-      const response = responses.get(index + 1);
-      const refused = Boolean(response?.error) || Boolean(response?.result?.isError);
-      assert(refused, `hostile id "${hostile[index]}" was accepted`);
-    }
-
-    // Nothing may have appeared anywhere outside the profiles directory.
-    for (const stray of [
-      "escape.json",
-      "hidden.json",
-      "UPPER.json",
-      "a.json",
-      "con.json",
-      "nul.json",
-    ]) {
-      assert(!existsSync(join(ROOT, stray)), `hostile write escaped to ${stray}`);
-    }
-    const after = existsSync(PROFILES_DIR) ? readdirSync(PROFILES_DIR).length : 0;
-    assert(
-      after === before,
-      `profile directory changed during hostile attempts (${before} -> ${after})`,
-    );
-
-    // Positive control: the same call path accepts a valid id.
-    const id = "gate-probe-control";
-    const path = cleanupProfile(id);
-    try {
-      const control = await callServer([
-        toolCall(1, "define_model_profile", {
-          id,
-          label: "Control",
-          description: "Positive control for the id-safety check",
-          guidance:
-            "This control proves the rejection above came from the identifier rules and not from a broken tool path.",
-        }),
-      ]);
-      assert(!control.get(1)?.result?.isError, "positive control was refused");
-      assert(existsSync(path), "positive control did not write its profile");
-    } finally {
-      cleanupProfile(id);
-    }
-    pass("id-safety");
-  },
-
-  async "profile-content"() {
-    const ids = ["claude", "gpt", "gemini", "compact", "local"];
-    const responses = await callServer(
-      ids.map((id, index) => toolCall(index + 1, "surface", {}, { profile: id })),
-    );
-
-    const guidances = [];
-    for (let index = 0; index < ids.length; index++) {
-      const text = textOf(responses.get(index + 1));
-      assert(text.includes(`(\`${ids[index]}\`)`), `profile ${ids[index]} did not resolve`);
-
-      const guidance = text.split("## Guidance")[1]?.split("Note:")[0]?.trim() ?? "";
-      assert(
-        guidance.length >= 200,
-        `profile ${ids[index]} guidance is only ${guidance.length} chars; expected substantive text`,
-      );
-      guidances.push(guidance);
-    }
-
-    const unique = new Set(guidances);
-    assert(
-      unique.size === ids.length,
-      `expected ${ids.length} distinct guidance bodies, found ${unique.size}`,
-    );
-    pass("profile-content");
-  },
-
   async "tool-smoke"() {
     if (!archivePresent()) return skipped("tool-smoke");
     const expected = skillsOnDisk();
@@ -937,6 +824,7 @@ const CHECKS = {
     );
     pass("tool-smoke");
   },
+
   ledger: checkLedger,
 };
 

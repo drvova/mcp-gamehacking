@@ -104,7 +104,7 @@ MCP (Model Context Protocol) server for game hacking & reverse engineering. A st
 
 ---
 
-## Tools (29 total)
+## Tools (28 total)
 
 ### Workflow Tools
 
@@ -133,180 +133,93 @@ MCP (Model Context Protocol) server for game hacking & reverse engineering. A st
 | `list_plugins` / `read_plugin`     | Browse and read plugin definitions   |
 | `list_prompts` / `read_prompt`     | Browse and read prompt templates     |
 
-### Profile Tools
+### Surface Tool
 
-| Tool                   | Description                                   |
-| ---------------------- | --------------------------------------------- |
-| `surface`              | Report, enumerate, or switch the tool surface |
-| `define_model_profile` | Author and persist a new surface              |
+| Tool      | Description                                       |
+| --------- | ------------------------------------------------- |
+| `surface` | Report, compose, keep and recall your own tooling |
 
----
-
-## Model Profiles
+## Tooling: the model builds its own
 
 Models do not work equally well on the same tools. A model that reasons well
 over a large surface and a small local model that needs four unambiguous
-single-argument tools are not served by the same list, so the server does not
-impose one.
-
-A profile owns a surface. It decides:
-
-- **which** tools it carries
-- **what order** they appear in
-- **how each one is described** — the wording a model actually reads
-
-That last point is why this is not a filter over a shared catalogue. Two models
-can both carry `read_source` and still need to be told about it in different
-terms.
-
-### There is no generic base — the seed is one tool
-
-An unrecognised caller gets **one tool and no working set**. That is the whole
-argument: if models do not perform equally on the same tools, then any base set
-is an assumption about the caller, and a set that fits no model in particular
-fits every model badly. So the server does not choose one.
+single-argument tools are not served by the same list — so this server does not
+impose one. **There is no base set, and no catalogue of surfaces to choose
+from.** You get one tool, the whole tool catalogue, and the means to build a
+surface from it.
 
 ```
-surface    the catalogue, and the means to compose your own surface from it
+surface          the only tool you begin with
 ```
 
-Calling it with no arguments reports where you are and lists **everything that
-exists**, so there is something to choose from. Then:
+Called with no arguments it reports where you are and lists **every registered
+tool**, each with its description, plus the delta between what you carry and
+what you do not. Then:
 
 ```
-surface { pick: ["search_skills", "read_skill"] }   compose your own, this session
-surface { set: "claude" }                           take a ready-made surface
-surface { list: "tools" }                           every tool, with its description
+surface { pick: [...] }               build your own surface, this session
+surface { save: "id" }                keep it, so later sessions can start there
+surface { set: "id" }                 recall a surface you saved
+surface { list: "tools" }             the catalogue again
+surface { list: "surfaces" }          what you have saved
 ```
 
-`pick` is the intended path. It is session-scoped and writes nothing to disk —
-a surface is a working set, not a commitment, so recomposing when the task
-changes shape costs one call. `define_model_profile` is the durable version: a
-named surface that persists and can auto-select itself in later sessions.
+`pick` is the path. Nothing is chosen for you — not here, and not anywhere else.
+A composed surface is session-scoped and writes nothing to disk until you `save`
+it, so recomposing when the task changes shape costs one call. Re-saving an id
+you already own **revises** it: your tooling has to be able to change as the work
+does.
 
-**Nothing is withheld in the meantime.** Every registered tool stays callable by
-name even when your surface does not present it, so a narrow surface is a
-presentation choice and never a lost capability — and `surface` always shows the
-delta between what you carry and what exists.
+**Nothing is withheld while you decide.** Every registered tool stays callable by
+name even when your surface does not carry it, so you can finish a task first and
+shape your surface afterwards. `surface` always shows the delta.
+
+### What the server does ship
+
+Exactly one surface, and it is not a choice:
+
+```
+profiles/manifest.json     seed surface, the core every surface must carry
+profiles/default.json      the seed itself: one tool
+```
+
+Any second file here would be the server guessing what some model needs, which is
+the thing this design exists to avoid. The gate `no-pre-authored-base` fails if
+one appears.
+
+### The surface core
+
+`surface` is carried by **every** surface, whatever else it drops. A surface may
+choose to be narrow; it may not choose to be _inescapable_ — without this one
+tool a model could not see that a surface governs it, could not discover the
+catalogue, and could not leave. The core is declared in `manifest.json` and
+enforced in the shaper, which every profile passes through: shipped, authored, or
+edited by hand on disk.
 
 ### The design is data
 
 No tool name, surface id, or list appears in the engine. The shape of the system
-lives in files, and the code reads them at runtime:
+lives in files, read at runtime:
 
 ```
-profiles/manifest.json     seed surface, the core every surface must carry
-profiles/<id>.json         one shipped surface: its tools, order, wording, guidance
-model-profiles/<id>.json   surfaces a model authored, overriding a shipped one
+profiles/manifest.json     { seed, surfaceCore, pickedId }
+profiles/<id>.json         a surface shipped with the server
+model-profiles/<id>.json   surfaces you built and saved
 ```
 
-`manifest.json` is the whole system definition:
+Both directories go through the same schema, so a shipped surface and a saved one
+are the same kind of thing: one is simply already on disk. Adding, reordering or
+rewording a surface is an edit to data — no rebuild, no source change. The
+`data-driven` gate enforces that: it fails if a surface id appears in the source,
+and proves a drop-in file takes effect with the built artifact byte-identical.
 
-```jsonc
-{
-  "seed": "default", // where an unrecognised caller lands
-  "surfaceCore": ["surface"], // every surface must carry these, whatever it drops
-  "pickedId": "picked", // id given to a surface composed at runtime
-}
-```
+### Resolution
 
-A surface is a file. Adding one, reordering one, changing its wording, or
-changing the core every surface must carry is an edit to data — **no rebuild, no
-source change**:
-
-```jsonc
-// profiles/researcher.json — dropped in, live immediately
-{
-  "id": "researcher",
-  "label": "Researcher",
-  "description": "Search-heavy, with its own wording.",
-  "match": { "clientNames": ["my-research-client"], "models": [] },
-  "tools": {
-    "include": ["search_skills", "read_skill", "find_similar"],
-    "order": ["search_skills", "read_skill", "find_similar"],
-    "descriptions": { "find_similar": "Find alternatives before concluding." },
-  },
-  "guidance": "Written for this surface, at least 80 characters...",
-  "workflow": ["Search.", "Compare.", "Conclude."],
-}
-```
-
-Both directories are read through the same schema, so a shipped surface and a
-model-authored one are the same kind of thing: a shipped one is simply present
-on disk already. A malformed file is reported by `surface` and skipped — one bad
-profile can never stop the server from starting.
-
-This is enforced, not just intended: the `data-driven` gate fails the build if a
-shipped surface id appears in the source, and proves a drop-in file takes effect
-without the built artifact changing.
-
-### Resolution order
-
-The first match wins:
-
-1. `_meta.profile` on the request — an explicit profile id
-2. `_meta.model` on the request — matched against each profile's `models`
-3. the session override — a composed surface from `pick`, or a named one from `set`
-4. `MCP_MODEL_PROFILE` or `MCP_MODEL` in the environment
-5. the client name reported at initialize, matched against `clientNames`
-6. `default` — the seed
-
-An unrecognised caller always lands on the seed, never on an unfitted
-everything-surface.
-
-### Built-in profiles
-
-| Profile   | Surface                                                      |
-| --------- | ------------------------------------------------------------ |
-| `default` | the 1-tool seed                                              |
-| `full`    | all 29, registration order, server wording                   |
-| `claude`  | curated-first, with cross-check guidance                     |
-| `gpt`     | short deterministic sequences, compact results               |
-| `gemini`  | aggregation-first, per-claim attribution                     |
-| `compact` | 5 working tools + `surface`, search weighted over reading    |
-| `local`   | 4 working tools + `surface`, single-argument, no composition |
-
-### The surface core
-
-`surface` is carried by **every** surface, whatever else a profile drops.
-
-A profile may choose to be narrow; it may not choose to be _inescapable_.
-Without this one tool a model auto-detected into `local` could neither see that
-a surface governed it nor leave — a capability loss caused by withheld
-knowledge, landing hardest on exactly the small models least able to guess a
-tool name.
-
-The core is enforced in the shaper, which every profile passes through, so it
-holds for built-ins, authored profiles, and files edited by hand on disk. An
-authored profile that tries to exclude it is told so, and the exclusion is
-dropped rather than silently honoured.
-
-### Authoring a profile
-
-A model can build its own surface, including the wording it reads. It is stored
-in `model-profiles/<id>.json` and is available to later sessions:
-
-```jsonc
-// define_model_profile
-{
-  "id": "my-model",
-  "label": "My Model",
-  "description": "When this profile fits",
-  "guidance": "Model-specific operating guidance, at least 80 characters.",
-  "models": ["my-model-name"],
-  "tool_include": ["search_skills", "read_skill"],
-  "tool_order": ["search_skills", "read_skill"],
-  "tool_descriptions": {
-    "search_skills": "One distinctive word beats a sentence.",
-  },
-  "workflow": ["Search first.", "Then read."],
-}
-```
-
-Ids are restricted to lowercase kebab-case and Windows reserved device names are
-rejected, so a profile id can never resolve to a path outside `model-profiles/`.
-
----
+A request's surface is chosen by the first of: `_meta.profile`, `_meta.model`, the
+session override from `set`, `MCP_MODEL_PROFILE`/`MCP_MODEL`, a client-name match,
+or the seed. With nothing pre-authored, an unrecognised caller always lands on the
+seed — and `detect-client` is the gate that proves no client is quietly handed a
+base set.
 
 ## Installation
 
@@ -426,8 +339,8 @@ mcp-gamehacking/
 +|   +-- builtin.ts            #   built-in profiles
 +|   +-- registry.ts           #   load, validate, persist
 +|   +-- resolve.ts            #   resolution order and tool shaping
-+-- profiles/                  # SHIPPED surfaces + manifest.json (data)
-+-- model-profiles/            # Model-authored surfaces (data, runtime)
++-- profiles/                  # SHIPPED: manifest.json + the seed (data)
++-- model-profiles/            # Surfaces the model built and saved (data)
 +-- test/                      # Rstest suites
 +-- dist/                      # Compiled JS
 +-- skills/                    # 4,161 skill directories
