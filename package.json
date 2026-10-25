@@ -5,9 +5,13 @@
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc",
+    "build": "rs lib",
     "start": "node dist/index.js",
-    "dev": "tsx src/index.ts",
+    "dev": "rs lib --watch",
+    "test": "rs test",
+    "lint": "rs lint",
+    "format": "rs fmt",
+    "check": "rs check --type-check",
     "inspect": "npx @modelcontextprotocol/inspector node dist/index.js"
   },
   "keywords": [
@@ -37,11 +41,12 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1"
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
-    "typescript": "^5.7.0",
-    "tsx": "^4.19.0",
-    "@types/node": "^22.0.0"
+    "@types/node": "^22.0.0",
+    "rstack": "^0.8.5",
+    "typescript": "^5.7.0"
   }
 }
