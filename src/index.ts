@@ -1,10 +1,19 @@
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { readdir, readFile, stat } from "fs/promises";
 import { join, resolve } from "path";
 import { createReadStream, readFileSync } from "fs";
 import { createInterface } from "readline";
+import { loadProfiles, saveProfile } from "./profiles/registry.js";
+import {
+  getSessionProfile,
+  resolveProfile,
+  setSessionProfile,
+  shapeToolNames,
+} from "./profiles/resolve.js";
+import { PROFILE_ID_MESSAGE, PROFILE_ID_PATTERN } from "./profiles/types.js";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const DIRS = {
@@ -377,10 +386,19 @@ const PKG_VERSION = z
   .object({ version: z.string() })
   .parse(JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"))).version;
 
-const server = new McpServer({
-  name: "mcp-gamehacking",
-  version: PKG_VERSION,
-});
+const server = new McpServer(
+  {
+    name: "mcp-gamehacking",
+    version: PKG_VERSION,
+  },
+  {
+    instructions:
+      "Knowledge base for game hacking and reverse engineering: 4,160 skills, 75 agents, 161 subagents, 114 plugins and 148 prompts, including full source archives for roughly 3,980 projects.\n\n" +
+      "The tool surface adapts to the calling model. Call `get_model_profile` before substantive work: it reports which profile governs this session, why it was selected, and the working guidance written for that model. A profile reorders and may narrow what `tools/list` presents, but it never removes capability — any tool remains callable by name.\n\n" +
+      "A model may define its own profile with `define_model_profile`, which persists it for later sessions, and select one with `set_model_profile`. Per-request `_meta.profile` or `_meta.model` overrides both for that call.\n\n" +
+      "Start with `search_skills` or `research_technique`, read the curated SKILL.md via `read_skill`, and treat `read_source` as an unedited archive dump: it is paginated and single projects can exceed 100,000 lines.",
+  },
+);
 
 // ============================================================
 // MCP RESOURCES
@@ -1790,6 +1808,215 @@ for (const { singular, plural, dir } of componentTools) {
     },
   );
 }
+
+// ============================================================
+// MODEL PROFILES
+// ============================================================
+
+/** Root that holds the archive data and the model-authored profiles. */
+const PROFILE_ROOT = ROOT;
+
+type ToolListResult = { tools: Array<{ name: string }> };
+type ToolListHandler = (
+  request: unknown,
+  extra: unknown,
+) => ToolListResult | Promise<ToolListResult>;
+
+/**
+ * Re-present `tools/list` in the order and scope the active profile declares.
+ *
+ * McpServer keeps its handlers in a private map with no public accessor, so the
+ * existing handler is read through a narrow structural type and wrapped, instead
+ * of reimplementing the SDK's own schema conversion. If that internal shape is
+ * ever absent the SDK handler is left untouched and the unshaped surface is
+ * served: the profile layer degrades to a no-op rather than breaking the server.
+ */
+function installProfileAwareToolList(mcp: McpServer): boolean {
+  const protocol = mcp.server as unknown as {
+    _requestHandlers?: Map<string, ToolListHandler>;
+    removeRequestHandler?: (method: string) => void;
+  };
+
+  const handlers = protocol._requestHandlers;
+  if (!(handlers instanceof Map) || typeof protocol.removeRequestHandler !== "function") {
+    return false;
+  }
+
+  const original = handlers.get("tools/list");
+  if (typeof original !== "function") return false;
+
+  protocol.removeRequestHandler("tools/list");
+  mcp.server.setRequestHandler(ListToolsRequestSchema, async (request, extra) => {
+    // Snapshot request-scoped inputs before awaiting anything, so a later
+    // pipelined request cannot change what this one resolves to.
+    const meta = extra?._meta;
+    const clientName = mcp.server.getClientVersion()?.name ?? null;
+    const session = getSessionProfile();
+
+    const base = await original(request, extra);
+    const resolved = await resolveProfile(PROFILE_ROOT, { meta, clientName, session });
+
+    const byName = new Map(base.tools.map((tool) => [tool.name, tool]));
+    const shaped = shapeToolNames([...byName.keys()], resolved.profile)
+      .map((name) => byName.get(name))
+      .filter((tool) => tool !== undefined);
+
+    return { ...base, tools: shaped };
+  });
+
+  return true;
+}
+
+server.tool(
+  "list_model_profiles",
+  "List every available model profile: built-in ones plus any a model has authored. Also reports profiles that failed to load.",
+  {},
+  async () => {
+    const { profiles, invalid } = await loadProfiles(PROFILE_ROOT, { fresh: true });
+    const builtinIds = new Set((await loadProfiles(PROFILE_ROOT)).profiles.keys());
+    const active = getSessionProfile();
+
+    const rows = [...profiles.values()]
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .map((profile) => {
+        const origin = builtinIds.has(profile.id) ? "built-in" : "model-authored";
+        const mark = profile.id === active ? " (session override)" : "";
+        const scope =
+          profile.tools.include && profile.tools.include.length > 0
+            ? `${profile.tools.include.length} tools listed`
+            : "full surface";
+        return `- **${profile.id}**${mark} [${origin}] — ${profile.description}\n  Presents: ${scope}`;
+      });
+
+    const problems = invalid.length
+      ? `\n\nUnusable profile files:\n${invalid.map((entry) => `- ${entry.file}: ${entry.reason}`).join("\n")}`
+      : "";
+
+    const wiring = PROFILES_WIRED
+      ? "Tool listing is profile-aware."
+      : "Tool listing is NOT profile-aware in this build; the full surface is served.";
+
+    return ok(
+      `Available model profiles (${profiles.size}):\n\n${rows.join("\n")}${problems}\n\n${wiring}`,
+    );
+  },
+);
+
+server.tool(
+  "get_model_profile",
+  "Report the profile governing this session: which profile, why it was selected, its model-specific guidance, and the tool order it applies.",
+  {},
+  async (_args, extra) => {
+    const meta = extra?._meta;
+    const clientName = server.server.getClientVersion()?.name ?? null;
+    const session = getSessionProfile();
+    const resolved = await resolveProfile(PROFILE_ROOT, { meta, clientName, session });
+    const { profile, source, matched } = resolved;
+
+    const why = matched
+      ? `selected by \`${source}\` matching \`${matched}\``
+      : "no signal matched, so the neutral default applies";
+
+    const steps = profile.workflow.length
+      ? `\n\n## Recommended workflow\n${profile.workflow.map((step, i) => `${i + 1}. ${step}`).join("\n")}`
+      : "";
+
+    const order = profile.tools.order.length
+      ? `\n\nPreferred tool order: ${profile.tools.order.map((t) => `\`${t}\``).join(" → ")}`
+      : "";
+
+    return ok(
+      `# Model profile: ${profile.label} (\`${profile.id}\`)\n\n` +
+        `${profile.description}\n\n` +
+        `Selected because ${why}. Client reported: \`${clientName ?? "unknown"}\`.\n\n` +
+        `## Guidance\n${profile.guidance}${steps}${order}\n\n` +
+        `Note: a profile shapes which tools are listed, never which are callable. Any tool can still be called by name.`,
+    );
+  },
+);
+
+server.tool(
+  "set_model_profile",
+  "Select the profile for this session. Use the id from list_model_profiles, or 'auto' to clear the override and fall back to detection.",
+  {
+    id: z.string().describe("Profile id, or 'auto' to clear the session override"),
+  },
+  async ({ id }) => {
+    if (id === "auto") {
+      setSessionProfile(null);
+      return ok("Session profile override cleared; detection applies again.");
+    }
+
+    // Apply the override before the first await so a pipelined tools/list cannot
+    // resolve ahead of it, then roll back if the id turns out to be unknown.
+    const previous = getSessionProfile();
+    setSessionProfile(id);
+
+    const { profiles } = await loadProfiles(PROFILE_ROOT);
+    if (!profiles.has(id)) {
+      // Only roll back if nothing newer has taken over in the meantime.
+      if (getSessionProfile() === id) setSessionProfile(previous);
+      const known = [...profiles.keys()].sort().join(", ");
+      return err(`Unknown profile "${id}". Available: ${known}.`);
+    }
+
+    return ok(`Session profile set to \`${id}\`. Subsequent tools/list calls use it.`);
+  },
+);
+
+server.tool(
+  "define_model_profile",
+  "Author a model profile and persist it, so it is available in later sessions. The profile shapes which tools are listed and what guidance get_model_profile returns.",
+  {
+    id: z.string().regex(PROFILE_ID_PATTERN, PROFILE_ID_MESSAGE).describe(PROFILE_ID_MESSAGE),
+    label: z.string().describe("Human-readable name"),
+    description: z.string().describe("One line describing when this profile fits"),
+    guidance: z.string().describe("Model-specific operating guidance, at least 80 characters"),
+    client_names: z
+      .array(z.string())
+      .optional()
+      .describe("Client names that auto-select this profile, matched case-insensitively"),
+    models: z.array(z.string()).optional().describe("Model names that auto-select this profile"),
+    tool_order: z.array(z.string()).optional().describe("Preferred tool ordering"),
+    tool_include: z
+      .array(z.string())
+      .optional()
+      .describe("When set, only these tools are listed (they remain callable regardless)"),
+    tool_exclude: z.array(z.string()).optional().describe("Tools omitted from the listing"),
+    workflow: z.array(z.string()).optional().describe("Ordered working steps for this model"),
+  },
+  async (args) => {
+    let saved;
+    try {
+      saved = await saveProfile(PROFILE_ROOT, {
+        id: args.id,
+        label: args.label,
+        description: args.description,
+        guidance: args.guidance,
+        match: { clientNames: args.client_names ?? [], models: args.models ?? [] },
+        tools: {
+          order: args.tool_order ?? [],
+          include: args.tool_include,
+          exclude: args.tool_exclude ?? [],
+        },
+        workflow: args.workflow ?? [],
+      });
+    } catch (error) {
+      // A rejected profile is an expected outcome, not a server fault, so report
+      // the reason plainly instead of letting the handler throw.
+      const reason = error instanceof Error ? error.message : String(error);
+      return err(`Profile not saved: ${reason}`);
+    }
+
+    const where = `model-profiles/${saved.id}.json`;
+    return ok(
+      `Profile \`${saved.id}\` saved to ${where}.\n\n` +
+        `Select it with \`set_model_profile\`, or let it auto-select by naming this client in \`client_names\` or the model in \`models\`.`,
+    );
+  },
+);
+
+const PROFILES_WIRED = installProfileAwareToolList(server);
 
 // ============================================================
 // MAIN

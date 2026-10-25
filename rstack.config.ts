@@ -37,5 +37,14 @@ define.fmt({
   // They are tracked in git (so .gitignore does not cover them) but reformatting
   // them would rewrite thousands of upstream files. Scope formatting to the
   // server's own source and docs.
-  ignorePatterns: ["skills/**", "agents/**", "subagents/**", "plugins/**", "prompts/**"],
+  ignorePatterns: [
+    "skills/**",
+    "agents/**",
+    "subagents/**",
+    "plugins/**",
+    "prompts/**",
+    // Local-only working artifacts: excluded from git, so they are not source.
+    "GATES.md",
+    ".unlazy/**",
+  ],
 });
