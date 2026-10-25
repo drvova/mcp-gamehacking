@@ -1727,3 +1727,259 @@ describe("the chain runner's own edges", () => {
     }
   });
 });
+
+describe("the floor cannot be removed", () => {
+  // The worst defect found: a model could replace the shipped seed, which is the
+  // one surface every unrecognised caller lands on. A brand-new client then got
+  // `skill_stats` instead of the catalogue, and there was no way back except
+  // deleting a file by hand. The floor is what makes a narrow surface safe.
+  it("refuses to save over a shipped surface", async () => {
+    const session = await openSession();
+    try {
+      const refused = await session.request(
+        toolCall(1, "surface", {
+          pick: ["read_agent"],
+          save: MANIFEST.seed,
+          guidance:
+            "An attempt to save over the shipped seed, which is the surface an unrecognised caller lands on.",
+        }),
+      );
+
+      expect(wasRefused(refused)).toBe(true);
+      expect(textOf(refused)).toMatch(/shipped surface/);
+    } finally {
+      session.close();
+    }
+  });
+
+  it("refuses the id the engine uses for a composed surface", async () => {
+    const session = await openSession();
+    try {
+      // A file under this name would mean two different things at once: the
+      // in-memory surface and a saved one.
+      const refused = await session.request(
+        toolCall(1, "surface", {
+          pick: ["read_agent"],
+          save: MANIFEST.pickedId,
+          guidance:
+            "An attempt to save under the id the engine reserves for a surface composed in memory this session.",
+        }),
+      );
+
+      expect(wasRefused(refused)).toBe(true);
+      expect(textOf(refused)).toMatch(/reserved/);
+    } finally {
+      session.close();
+    }
+  });
+
+  it("still lets a legitimate id be saved", async () => {
+    const probe = cleanupProbe();
+    try {
+      const session = await openSession();
+      try {
+        const saved = await session.request(
+          toolCall(1, "surface", {
+            pick: ["read_agent"],
+            save: PROBE_ID,
+            guidance:
+              "A legitimate save, to prove the guards refuse only the ids that must not be writable.",
+          }),
+        );
+        expect(wasRefused(saved)).toBe(false);
+      } finally {
+        session.close();
+      }
+
+      expect(existsSync(probe)).toBe(true);
+    } finally {
+      cleanupProbe();
+    }
+  });
+
+  it("keeps the seed when a hand-edited file tries to replace it", async () => {
+    // The save guard is not enough on its own: a file written directly to disk
+    // never passes through it. This is the path that actually hijacked the seed.
+    // The hijack is attempted in the AUTHORED directory, which is writable and
+    // where a model's own surfaces live. The shipped seed is elsewhere and is
+    // never touched.
+    const path = join(PROFILES_DIR, `${MANIFEST.seed}.json`);
+    try {
+      writeFileSync(
+        path,
+        JSON.stringify({
+          id: MANIFEST.seed,
+          label: "HIJACKED",
+          description: "A hand-edited replacement of the seed.",
+          match: { clientNames: [], models: [] },
+          tools: {
+            include: ["skill_stats"],
+            order: [],
+            exclude: [],
+            descriptions: {},
+            derived: [],
+            output: {},
+            then: [],
+          },
+          guidance:
+            "A hand-edited attempt to replace the shipped seed, written to disk to bypass the save guard.",
+          workflow: [],
+        }),
+        "utf8",
+      );
+
+      const responses = await callServer(
+        [listTools(1), toolCall(2, "surface")],
+        "brand-new-client",
+      );
+      expect(toolNames(responses.get(1))).toEqual(SEED_SURFACE);
+
+      const report = textOf(responses.get(2));
+      expect(report).toContain("Seed");
+      expect(report).not.toContain("HIJACKED");
+    } finally {
+      // The seed is a tracked file, so it is restored from git rather than
+      // deleted: deleting it would remove the floor this test exists to protect.
+      rmSync(path, { force: true });
+    }
+  });
+
+  it("reports a refused replacement rather than swallowing it", async () => {
+    const path = join(PROFILES_DIR, `${MANIFEST.seed}.json`);
+    try {
+      writeFileSync(
+        path,
+        JSON.stringify({
+          id: MANIFEST.seed,
+          label: "HIJACKED",
+          description: "x",
+          match: { clientNames: [], models: [] },
+          tools: {
+            include: ["skill_stats"],
+            order: [],
+            exclude: [],
+            descriptions: {},
+            derived: [],
+            output: {},
+            then: [],
+          },
+          guidance:
+            "A hand-edited attempt to replace the shipped seed surface, written to disk to bypass the save guard.",
+          workflow: [],
+        }),
+        "utf8",
+      );
+
+      // Silent rejection would be its own problem: a model that tried to replace
+      // the seed should be told it could not, not left wondering.
+      const listed = textOf(
+        (await callServer([toolCall(1, "surface", { list: "surfaces" })])).get(1),
+      );
+      expect(listed).toMatch(/Unusable profile files/);
+      expect(listed).toMatch(/shipped surface and cannot be replaced/);
+    } finally {
+      rmSync(path, { force: true });
+    }
+  });
+});
+
+describe("the catalogue agrees with reality", () => {
+  // The catalogue is the primary discovery surface, so it must not describe a
+  // surface that differs from the one the caller actually has. It did: it
+  // rendered the carried set by filtering the REGISTERED list, so a tool the
+  // surface had defined for itself vanished from it entirely — not in Carried,
+  // not in Not carried, and the count was short.
+  it("shows a tool the surface defined for itself", async () => {
+    const session = await openSession();
+    try {
+      await session.request(
+        toolCall(1, "surface", {
+          pick: [
+            "list_agents",
+            { tool: "read_agent", as: "mine", args: { name: "exploit-developer" } },
+          ],
+        }),
+      );
+
+      const listed = toolNames(await session.request(listTools(2)));
+      const catalogue = textOf(await session.request(toolCall(3, "surface", { list: "tools" })));
+
+      // The two views must agree about what is carried, or one of them is lying.
+      const carriedSection = catalogue.slice(
+        catalogue.indexOf("## Carried"),
+        catalogue.indexOf("## Not carried"),
+      );
+      for (const name of listed) {
+        expect(carriedSection).toContain(`\`${name}\``);
+      }
+      expect(carriedSection).toMatch(new RegExp(`\\(${listed.length}\\)`));
+    } finally {
+      session.close();
+    }
+  });
+
+  it("marks which carried tools the surface defined rather than registered", async () => {
+    const session = await openSession();
+    try {
+      await session.request(
+        toolCall(1, "surface", {
+          pick: [{ tool: "read_agent", as: "mine", args: { name: "exploit-developer" } }],
+        }),
+      );
+
+      const catalogue = textOf(await session.request(toolCall(2, "surface", { list: "tools" })));
+      const carriedSection = catalogue.slice(
+        catalogue.indexOf("## Carried"),
+        catalogue.indexOf("## Not carried") === -1
+          ? catalogue.length
+          : catalogue.indexOf("## Not carried"),
+      );
+
+      // A reader must be able to tell a tool that exists only while this surface
+      // is active from one that is always registered.
+      expect(carriedSection).toMatch(/`mine`.*\*\*\[defined by this surface\]\*\*/);
+      expect(carriedSection).toMatch(/this surface defines for itself/);
+      // A registered tool must not be marked as defined.
+      expect(carriedSection).not.toMatch(/`surface`.*defined by this surface/);
+    } finally {
+      session.close();
+    }
+  });
+
+  it("keeps one line per tool even when a description has several", async () => {
+    const session = await openSession();
+    try {
+      // A defined tool's description carries its fixed arguments and its output
+      // rule, so it has newlines. A list entry spilling over four lines breaks
+      // the scanability the catalogue exists for.
+      await session.request(
+        toolCall(1, "surface", {
+          pick: [
+            {
+              tool: "read_agent",
+              as: "mine",
+              args: { name: "exploit-developer" },
+              output: { head: 3 },
+            },
+          ],
+        }),
+      );
+
+      const catalogue = textOf(await session.request(toolCall(2, "surface", { list: "tools" })));
+      const carriedSection = catalogue.slice(
+        catalogue.indexOf("## Carried"),
+        catalogue.indexOf("## Not carried") === -1
+          ? catalogue.length
+          : catalogue.indexOf("## Not carried"),
+      );
+
+      const entries = carriedSection.split("\n").filter((line) => line.startsWith("- `"));
+      expect(entries).toHaveLength(2);
+      // Every entry is exactly one line, and the fixed-argument notice is folded
+      // into it rather than breaking the list.
+      expect(entries[0]).toContain("Already set for you");
+    } finally {
+      session.close();
+    }
+  });
+});

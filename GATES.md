@@ -95,3 +95,11 @@ Scope: A model builds its own tooling. The server ships no base of tools and no 
 - [x] G21: The chain runner holds its own contract: extraction reads the RAW answer at every step position, a step cannot fill an argument that changes session state (by extraction or on a defined alias), a refusal leaves the surface untouched, and reading the surface tool as a step still works
   CHECK: node tools/checks/check.mjs chain-integrity
   EXPECT: gate-passed:chain-integrity
+
+- [x] G22: The floor cannot be removed — a shipped surface cannot be replaced by `save` or by a hand-edited file, the engine's runtime id is reserved, a refused replacement is reported rather than swallowed, and a legitimate id still saves
+  CHECK: node tools/checks/check.mjs floor-holds
+  EXPECT: gate-passed:floor-holds
+
+- [x] G23: The catalogue agrees with the listing — a tool the surface defined is shown and marked, the count matches, one line per entry, and a surface that defines nothing claims nothing
+  CHECK: node tools/checks/check.mjs catalog-agrees
+  EXPECT: gate-passed:catalog-agrees

@@ -2051,6 +2051,209 @@ const CHECKS = {
     pass("chain-integrity");
   },
 
+  async "floor-holds"() {
+    // The worst defect found in this codebase: a model could replace the shipped
+    // seed, which is the one surface every unrecognised caller lands on. A
+    // brand-new client then got `skill_stats` instead of the catalogue, and there
+    // was no way back except deleting a file by hand. The floor is what makes a
+    // narrow surface safe — remove it and the way out is gone.
+    const manifest = MANIFEST;
+    const path = join(ROOT, "model-profiles", `${manifest.seed}.json`);
+    cleanupProfile(manifest.seed);
+
+    const hostile = (id) =>
+      JSON.stringify({
+        id,
+        label: "HIJACKED",
+        description: "A hand-edited replacement of a shipped surface.",
+        match: { clientNames: [], models: [] },
+        tools: {
+          include: ["skill_stats"],
+          order: [],
+          exclude: [],
+          descriptions: {},
+          derived: [],
+          output: {},
+          then: [],
+        },
+        guidance:
+          "A hand-edited attempt to replace a shipped surface, written to disk to bypass the save guard.",
+        workflow: [],
+      });
+
+    try {
+      // (1) The save guard refuses the ids that must not be writable.
+      const guarded = await callServer([
+        toolCall(1, "surface", {
+          pick: ["read_agent"],
+          save: manifest.seed,
+          guidance:
+            "An attempt to save over the shipped seed, which an unrecognised caller lands on.",
+        }),
+        toolCall(2, "surface", {
+          pick: ["read_agent"],
+          save: manifest.pickedId,
+          guidance:
+            "An attempt to save under the id the engine reserves for a surface composed in memory.",
+        }),
+      ]);
+
+      for (const [id, what] of [
+        [1, "saving over a shipped surface"],
+        [2, "saving under the engine's runtime id"],
+      ]) {
+        const response = guarded.get(id);
+        assert(
+          Boolean(response?.error) || Boolean(response?.result?.isError),
+          `${what} was accepted`,
+        );
+      }
+
+      // (2) The save guard is not enough on its own: a file written straight to
+      // disk never passes through it, and that is the path that actually worked.
+      writeFileSync(path, hostile(manifest.seed), "utf8");
+
+      const client = await callServer([listTools(1), toolCall(2, "surface")], "brand-new-client");
+      const names = toolNames(client.get(1));
+      assert(
+        JSON.stringify(names) === JSON.stringify(SEED_SURFACE),
+        `a hand-edited file replaced the seed: a new client got ${names.join(",")}`,
+      );
+
+      const report = textOf(client.get(2));
+      assert(report.includes("Seed"), "the seed is no longer the surface a new client lands on");
+      assert(!report.includes("HIJACKED"), "a hand-edited file became the active surface");
+
+      // (3) A refused replacement is REPORTED, not swallowed. Silent rejection
+      // would be its own problem: a model that tried to replace the seed should
+      // be told it could not, not left wondering why nothing changed.
+      const listed = textOf(
+        (await callServer([toolCall(1, "surface", { list: "surfaces" })])).get(1),
+      );
+      assert(/Unusable profile files/.test(listed), "the rejected file was not reported at all");
+      assert(
+        /shipped surface and cannot be replaced/.test(listed),
+        `the rejection did not say why: ${listed.slice(-200)}`,
+      );
+    } finally {
+      cleanupProfile(manifest.seed);
+    }
+
+    assert(!existsSync(path), "cleanup failed to remove the probe file");
+
+    // (4) And a legitimate id still saves, so the guards refuse only what they
+    // are for.
+    const allowed = "gate-probe-floor";
+    cleanupProfile(allowed);
+    try {
+      const response = await callServer([
+        toolCall(1, "surface", {
+          pick: ["read_agent"],
+          save: allowed,
+          guidance:
+            "A legitimate save, proving the guards refuse only the ids that must not be writable.",
+        }),
+      ]);
+      assert(
+        !response.get(1)?.result?.isError,
+        `a legitimate save was refused: ${textOf(response.get(1)).slice(0, 160)}`,
+      );
+      assert(
+        existsSync(join(ROOT, "model-profiles", `${allowed}.json`)),
+        "a legitimate save wrote nothing",
+      );
+    } finally {
+      cleanupProfile(allowed);
+    }
+
+    pass("floor-holds");
+  },
+
+  async "catalog-agrees"() {
+    // The catalogue is the primary discovery surface, so it must not describe a
+    // surface different from the one the caller has. It did: the carried set was
+    // rendered by filtering the REGISTERED list, so a tool the surface defined
+    // for itself vanished from the catalogue entirely - absent from Carried,
+    // absent from Not-carried, and the count short. The listing and the call path
+    // both knew about it; the catalogue pretended it did not exist.
+    const session = await openSession();
+    try {
+      await session.request(
+        toolCall(1, "surface", {
+          pick: [
+            "list_agents",
+            {
+              tool: "read_agent",
+              as: "mine",
+              args: { name: "exploit-developer" },
+              output: { head: 3 },
+            },
+          ],
+        }),
+      );
+
+      const listed = toolNames(await session.request(listTools(2)));
+      const catalogue = textOf(await session.request(toolCall(3, "surface", { list: "tools" })));
+      const notCarried = catalogue.indexOf("## Not carried");
+      const carriedSection = catalogue.slice(
+        catalogue.indexOf("## Carried"),
+        notCarried === -1 ? catalogue.length : notCarried,
+      );
+
+      // The two views must agree, name for name, and on the count.
+      for (const name of listed) {
+        assert(
+          carriedSection.includes(`\`${name}\``),
+          `the catalogue omits \`${name}\`, which the listing carries`,
+        );
+      }
+      assert(
+        carriedSection.includes(`(${listed.length})`),
+        `the catalogue reports a different count than the listing carries: ${listed.length} listed`,
+      );
+
+      // A reader must be able to tell a tool that exists only while this surface
+      // is active from one that is always registered.
+      assert(
+        /`mine`.*\*\*\[defined by this surface\]\*\*/.test(carriedSection),
+        "a tool the surface defined is not marked as defined",
+      );
+      assert(
+        !/`surface`.*defined by this surface/.test(carriedSection),
+        "a registered tool was marked as defined by the surface",
+      );
+
+      // And one line per entry: a defined tool's description carries its fixed
+      // arguments and its output rule, so an unfolded entry would break the list.
+      const entries = carriedSection.split("\n").filter((line) => line.startsWith("- `"));
+      assert(
+        entries.length === listed.length,
+        `expected one line per carried tool, got ${entries.length} for ${listed.length}`,
+      );
+      assert(
+        entries.some((entry) => entry.includes("Already set for you")),
+        "the fixed-argument notice was dropped rather than folded into the entry",
+      );
+    } finally {
+      session.close();
+    }
+
+    // A surface with nothing defined must not gain the marker or the note.
+    const plain = await openSession();
+    try {
+      await plain.request(toolCall(1, "surface", { pick: ["read_agent"] }));
+      const catalogue = textOf(await plain.request(toolCall(2, "surface", { list: "tools" })));
+      assert(
+        !catalogue.includes("defined by this surface"),
+        "a surface that defines nothing still claimed to define something",
+      );
+    } finally {
+      plain.close();
+    }
+
+    pass("catalog-agrees");
+  },
+
   ledger: checkLedger,
 };
 

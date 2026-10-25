@@ -2750,18 +2750,35 @@ async function renderCatalogue(
   const all = await listRegisteredTools();
   if (all.length === 0) return "The tool catalogue is unavailable in this build.";
 
-  const carried = new Set(shapeTools(all, profile, core, mutatingArgs).map((tool) => tool.name));
+  // The carried set comes from the SHAPED list, not from filtering the
+  // registered one. A surface may define tools of its own, and those names exist
+  // nowhere in the registry — filtering by registration silently dropped them
+  // from the catalogue entirely, so a model that had defined a tool was told its
+  // surface carried fewer than it did.
+  const shaped = shapeTools(all, profile, core, mutatingArgs);
+  const carriedNames = new Set(shaped.map((tool) => tool.name));
+  const defined = new Set(
+    shaped.map((tool) => tool.name).filter((name) => !all.some((entry) => entry.name === name)),
+  );
+
   const render = (tools: ToolListResult["tools"]) =>
     tools
-      .map(
-        (tool) =>
+      .map((tool) => {
+        // A description may carry several lines (a defined tool says what it
+        // fixed, what it returns, and so on). This is a LIST, so they collapse
+        // into one: a tool whose entry spilled over four lines would break the
+        // scanability the catalogue exists for.
+        const summary = (tool.description ?? "").replace(/\s*\n\s*/g, " ").trim();
+        return (
           `- \`${tool.name}\`${summariseArgs(tool.inputSchema)}` +
-          `${tool.description ? ` — ${tool.description}` : ""}`,
-      )
+          `${defined.has(tool.name) ? " **[defined by this surface]**" : ""}` +
+          `${summary ? ` — ${summary}` : ""}`
+        );
+      })
       .join("\n");
 
-  const inside = all.filter((tool) => carried.has(tool.name));
-  const outside = all.filter((tool) => !carried.has(tool.name));
+  const inside = shaped;
+  const outside = all.filter((tool) => !carriedNames.has(tool.name));
 
   const rest = outside.length
     ? `\n\n## Not carried by \`${profile.id}\` (${outside.length})\n` +
@@ -2769,10 +2786,15 @@ async function renderCatalogue(
       render(outside)
     : "";
 
+  const mine = defined.size
+    ? `\n\n${defined.size} of these ${defined.size === 1 ? "is a tool" : "are tools"} this surface ` +
+      "defines for itself, marked above. They exist only while this surface is active."
+    : "";
+
   return (
     `# Tool catalogue (${all.length} registered)\n\n` +
     `\`${profile.id}\` carries ${inside.length} of them.\n\n` +
-    `## Carried by \`${profile.id}\` (${inside.length})\n${render(inside)}${rest}\n\n` +
+    `## Carried by \`${profile.id}\` (${inside.length})\n${render(inside)}${mine}${rest}\n\n` +
     "Build your working set from these with `surface` and `pick`, then keep it with `save`." +
     '\n\n`surface` with `detail: "<tool>"` explains one tool in full — every argument, what it accepts, and how to carry it.'
   );
@@ -2847,7 +2869,28 @@ async function saveSurface(
   core: readonly string[],
   mutatingArgs: Record<string, string[]>,
 ): Promise<{ failure: string } | { profile: ModelProfile; replaced: boolean }> {
-  const { profiles } = await loadSurfaces(PROFILE_ROOT, { fresh: true });
+  const { profiles, manifest } = await loadSurfaces(PROFILE_ROOT, { fresh: true });
+  const shipped = await shippedIds(PROFILE_ROOT);
+
+  // A shipped surface is the floor: it is what an unrecognised caller lands on,
+  // and replacing it would remove the only way back to the catalogue. The
+  // runtime id is refused for a different reason — the engine uses it for a
+  // surface composed in memory, so a file under that name means two things.
+  if (shipped.has(id)) {
+    return {
+      failure:
+        `\`${id}\` is a shipped surface, so it cannot be replaced. It is what an unrecognised ` +
+        "caller lands on, and removing it would take away the way back. Save under a different id.",
+    };
+  }
+  if (id === manifest.pickedId) {
+    return {
+      failure:
+        `\`${id}\` is reserved for a surface composed in memory this session, so a saved file ` +
+        "under that name would mean two things. Save under a different id.",
+    };
+  }
+
   const replaced = profiles.has(id);
 
   const tools = shapeTools(await listRegisteredTools(), current, core, mutatingArgs)

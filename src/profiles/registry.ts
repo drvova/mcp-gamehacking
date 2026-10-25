@@ -103,6 +103,20 @@ export async function loadSurfaces(
       continue;
     }
 
+    // A shipped surface is the floor and cannot be replaced from the authored
+    // directory. Without this an authored file silently overwrote the seed, so a
+    // model could remove the one surface every unrecognised caller lands on and
+    // brick its own starting point — recoverable only by deleting a file by hand.
+    // The id is refused here as well as at `save`, because a hand-edited file
+    // never passes through `save` at all.
+    if (shipped.profiles.some((profile) => profile.id === parsed.data.id)) {
+      invalid.push({
+        file,
+        reason: `"${parsed.data.id}" is a shipped surface and cannot be replaced; save under a different id`,
+      });
+      continue;
+    }
+
     profiles.set(parsed.data.id, parsed.data);
   }
 
