@@ -8,3 +8,6 @@ dist/
 npm-debug.log*
 .DS_Store
 Thumbs.db
+
+# Commit-message scratch files (committed twice by accident).
+*.tmp
