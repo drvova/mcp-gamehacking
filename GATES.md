@@ -111,3 +111,7 @@ Scope: A model builds its own tooling. The server ships no base of tools and no 
 - [x] G25: `detail` agrees with the catalogue — a tool the surface defined is explained and its example starts from the tool it wraps, an uncarried registered tool stays explainable (a model inspects one before picking it), and a name that does not exist names what the surface carries
   CHECK: node tools/checks/check.mjs detail-agrees
   EXPECT: gate-passed:detail-agrees
+
+- [x] G26: Every view of a surface agrees — the listing, the catalogue, the surface report and the detail view name the same carried set, and the listing declares the same chain, shaping and fixed arguments the detail view reports
+  CHECK: node tools/checks/check.mjs views-agree
+  EXPECT: gate-passed:views-agree

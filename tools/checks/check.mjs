@@ -2370,6 +2370,99 @@ const CHECKS = {
     pass("detail-agrees");
   },
 
+  async "views-agree"() {
+    // The systematic version of the defect that appeared three times in one pass:
+    // two views of the same surface disagreeing. Rather than three point fixes,
+    // this asserts that EVERY view agrees about one surface at once.
+    //
+    // The surface here is deliberately awkward: a registered tool, a tool it
+    // defines for itself with a chain and shaped output, and the core.
+    const session = await openSession();
+    try {
+      const composed = await session.request(
+        toolCall(1, "surface", {
+          pick: [
+            "list_agents",
+            {
+              tool: "read_agent",
+              as: "mine",
+              args: { name: "exploit-developer" },
+              output: { head: 3 },
+              then: [{ tool: "list_agents" }],
+            },
+          ],
+        }),
+      );
+      assert(
+        !composed?.result?.isError,
+        `composing the awkward surface failed: ${textOf(composed)}`,
+      );
+
+      const listed = toolNames(await session.request(listTools(2)));
+
+      // View 1: the catalogue.
+      const catalogue = textOf(await session.request(toolCall(3, "surface", { list: "tools" })));
+      const carriedStart = catalogue.indexOf("## Carried");
+      const notCarriedStart = catalogue.indexOf("## Not carried");
+      const carriedSection = catalogue.slice(
+        carriedStart,
+        notCarriedStart === -1 ? catalogue.length : notCarriedStart,
+      );
+      const catalogueNames = [...carriedSection.matchAll(/^- `([^`]+)`/gm)].map((m) => m[1]);
+
+      // View 2: the surface report.
+      const report = textOf(await session.request(toolCall(4, "surface")));
+
+      // Every view must name the same set. A view that carries a different set
+      // from the others is how the catalogue omitted a defined tool, and how the
+      // detail view denied one — each fixed pointwise before this existed.
+      assert(
+        JSON.stringify(catalogueNames) === JSON.stringify(listed),
+        `catalogue and listing disagree: ${catalogueNames.join(",")} vs ${listed.join(",")}`,
+      );
+
+      for (const name of listed) {
+        assert(
+          report.includes(`\`${name}\``),
+          `the surface report does not mention \`${name}\`, which the listing carries`,
+        );
+      }
+
+      // View 3: detail must explain every carried tool, including the defined one
+      // and the chained one.
+      for (const name of listed) {
+        const detail = textOf(await session.request(toolCall(5, "surface", { detail: name })));
+        assert(
+          detail.includes(`# ${name}`),
+          `detail does not explain \`${name}\`, which the listing carries: ${detail.slice(0, 100)}`,
+        );
+      }
+
+      // And the defined tool's detail must reflect BOTH of its rules, since the
+      // detail view is where a model learns what a tool will do.
+      const mine = textOf(await session.request(toolCall(6, "surface", { detail: "mine" })));
+      assert(/Runs a chain/.test(mine), "detail omitted the chain the listing declares");
+      assert(/first 3 lines/.test(mine), "detail omitted the shaping the listing declares");
+      assert(/Already set for you/.test(mine), "detail omitted the fixed argument");
+
+      // The listing must declare the same three things, or the two views describe
+      // different tools.
+      const listedMine = ((await session.request(listTools(7)))?.result?.tools ?? []).find(
+        (tool) => tool.name === "mine",
+      );
+      for (const claim of ["Runs a chain", "first 3 lines", "Already set for you"]) {
+        assert(
+          (listedMine?.description ?? "").includes(claim),
+          `the listing omits "${claim}" that the detail view reports`,
+        );
+      }
+    } finally {
+      session.close();
+    }
+
+    pass("views-agree");
+  },
+
   ledger: checkLedger,
 };
 
