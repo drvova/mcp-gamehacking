@@ -122,6 +122,68 @@ describe("discovery is in-language", () => {
   });
 });
 
+describe("a helper keeps its own identity", () => {
+  // Found by driving the live host: the helper worked but had lost its name, and
+  // `describe` reported a BODY LINE as if it were documentation. Both are the
+  // discovery surface lying about the model's own tools.
+  it("keeps the name it was defined with", async () => {
+    await run("const briefing = async (q) => q;");
+
+    // Assignment through a property does not infer a function's name the way a
+    // declaration does, so this is set explicitly when the definition is saved.
+    expect(await run("briefing.name")).toBe("briefing");
+  });
+
+  it("reports the description the author wrote, not a line of its body", async () => {
+    await run("/** Build a short briefing for a query. */\nconst documented = async (q) => q;");
+    const described = await run("describe(documented)");
+
+    expect(described).toContain("Build a short briefing for a query.");
+    expect(described).not.toContain("async (q) => q");
+  });
+
+  it("reports no description at all when none was written", async () => {
+    await run("const undescribed = (x) => x;");
+    const described = await run("describe(undescribed)");
+
+    // A body line presented as a description reads as the author's intent, which
+    // is worse than saying nothing.
+    expect(described).toContain("undescribed(x)");
+    expect(described).not.toMatch(/=>|return|const /);
+  });
+
+  it("does not attach a comment that belongs to an earlier statement", async () => {
+    await run("const earlier = 1;\n/** Describes the later one. */\nconst later = (x) => x;");
+
+    expect(await run("describe(earlier)")).not.toContain("Describes the later one.");
+    expect(await run("describe(later)")).toContain("Describes the later one.");
+  });
+
+  it("does not attach a comment when a statement sits between it and the definition", async () => {
+    // The comment documents `first`, and `between` follows it before `after`.
+    // Attaching it to `after` would misattribute the author's words, so the rule
+    // is that ONLY whitespace may separate a comment from its declaration.
+    await run("/** Documents first. */\nconst first = 1;\nconst between = 2;\nconst after = 3;");
+
+    expect(await run("describe(first)")).toContain("Documents first.");
+    expect(await run("describe(between)")).not.toContain("Documents first.");
+    expect(await run("describe(after)")).not.toContain("Documents first.");
+  });
+
+  it("keeps the description across a restart, and drops it on forget", async () => {
+    await run("/** Survives a restart. */\nconst durable = (x) => x;");
+    session?.close();
+    session = null;
+
+    expect(await run("describe(durable)")).toContain("Survives a restart.");
+
+    await run('forget("durable")');
+    await run("const durable = (x) => x;");
+    // A redefined name must not inherit the previous author's words.
+    expect(await run("describe(durable)")).not.toContain("Survives a restart.");
+  });
+});
+
 describe("one long-lived namespace", () => {
   it("reuses a helper defined in an earlier call without redefining it", async () => {
     await run("const tag = (s) => `[${s}]`;");

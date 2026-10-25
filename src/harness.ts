@@ -156,8 +156,9 @@ function awaitsHere(node: unknown): boolean {
   return false;
 }
 
-/** One persisted definition: the name it binds, and the source that binds it. */
-type Definition = { name: string; source: string };
+/** One persisted definition: the name it binds, the source that binds it, and the
+ *  comment the author wrote above it. */
+type Definition = { name: string; source: string; doc?: string };
 
 /**
  * Rewrite a declaration so it can be persisted and later refined.
@@ -176,12 +177,19 @@ function persistable(code: string, node: Statement): Definition[] {
     );
     return named.map((d) => {
       const init = d.init ? code.slice(d.init.start, d.init.end) : undefined;
+      const name = d.id.name;
+      if (init === undefined) return { name, source: `globalThis.${name} = undefined;` };
+
+      const source = `globalThis.${name} = ${init};`;
+      if (!isFunctionLike(d.init)) return { name, source };
+      // Assignment through a property does NOT infer the function's name the way
+      // a declaration does, so `describe(helper)` would report `anonymous` and the
+      // model would lose its own vocabulary. The name is set explicitly.
       return {
-        name: d.id.name,
+        name,
         source:
-          init === undefined
-            ? `globalThis.${d.id.name} = undefined;`
-            : `globalThis.${d.id.name} = ${init};`,
+          `${source}\n` +
+          `try { Object.defineProperty(globalThis.${name}, "name", { value: ${JSON.stringify(name)}, configurable: true }); } catch {}`,
       };
     });
   }
@@ -216,6 +224,98 @@ function expressionOf(node: Statement): acorn.Node | null {
   if (expression === null || typeof expression !== "object") return null;
   if (!("start" in expression) || !("end" in expression)) return null;
   return expression as acorn.Node;
+}
+
+/**
+ * The author's description from a saved definition file, or undefined.
+ *
+ * The file carries the harness's own header comments, so the FIRST comment in it
+ * is not the author's — reading that one reported the harness's note as the
+ * helper's description. The comment that counts is the one attached to the
+ * assignment itself, which is the same rule applied when the definition was
+ * first written.
+ */
+function docFromSavedFile(text: string): string | undefined {
+  try {
+    const comments: { start: number; end: number; value: string }[] = [];
+    const ast = acorn.parse(text, {
+      ecmaVersion: "latest",
+      sourceType: "script",
+      onComment: (_block, value, start, end) => comments.push({ start, end, value }),
+    });
+    const first = ast.body[0];
+    if (first === undefined) return undefined;
+    return leadingComment(comments, text, first.start);
+  } catch {
+    // A file that does not parse has no recoverable description; the load path
+    // reports the parse failure itself.
+    return undefined;
+  }
+}
+
+/**
+ * The comment immediately above a declaration, or undefined.
+ *
+ * Only whitespace may separate them: a comment two statements up describes
+ * something else, and attaching it here would be a lie about authorship.
+ */
+function leadingComment(
+  comments: { start: number; end: number; value: string }[],
+  code: string,
+  start: number,
+): string | undefined {
+  let best: { end: number; value: string } | undefined;
+  for (const comment of comments) {
+    // Only whitespace may separate the comment from the declaration. A comment
+    // above another statement describes that statement, and attaching it here
+    // would misattribute the author's words.
+    if (comment.end > start) continue;
+    if (code.slice(comment.end, start).trim() !== "") continue;
+    if (best === undefined || comment.end > best.end) best = comment;
+  }
+  if (best === undefined) return undefined;
+
+  const text = best.value
+    .split("\n")
+    .map((line) => line.replace(/^\s*\*?\s?/, "").trim())
+    .filter((line) => line.length > 0)
+    .join(" ");
+  return text.length > 0 ? text : undefined;
+}
+
+/**
+ * The first comment in a function's source, or undefined.
+ *
+ * A block comment wins; otherwise the first `//` line before any statement. Body
+ * code is never returned, because a body line shown as a description reads as
+ * documentation and is not.
+ */
+function firstComment(source: string): string | undefined {
+  const lines = source.split("\n").map((line) => line.trim());
+
+  for (const line of lines.slice(1)) {
+    const block = /^\/\*\*?\s*(.*?)\s*\*?\/?$/.exec(line);
+    if (block?.[1]) return block[1].replace(/^\*\s?/, "").trim();
+  }
+
+  for (const line of lines.slice(1)) {
+    if (line.startsWith("//")) {
+      const text = line.replace(/^\/\/+\s?/, "").trim();
+      if (text.length > 0) return text;
+      continue;
+    }
+    // A statement means the comments are over: stop rather than reaching into
+    // the body.
+    if (/^(const|let|var|return|await|if|for|while|throw|globalThis|Object)\b/.test(line)) break;
+  }
+  return undefined;
+}
+
+/** Whether a node is a function or arrow function, which can carry a name. */
+function isFunctionLike(node: unknown): boolean {
+  if (node === null || typeof node !== "object" || !("type" in node)) return false;
+  const type = node.type;
+  return type === "ArrowFunctionExpression" || type === "FunctionExpression";
 }
 
 /** Render a value for the model: strings as-is, everything else as JSON. */
@@ -419,6 +519,17 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
 
   // ------------------------------------------------------------ introspection
 
+  /**
+   * The name a value is bound to, when exactly one name holds it.
+   *
+   * Ambiguity is reported as ambiguity: if two bindings hold the same value, no
+   * name is claimed, because guessing one would attach the wrong description.
+   */
+  const nameOf = (value: unknown): string | undefined => {
+    const matches = [...docs.keys()].filter((name) => context[name] === value);
+    return matches.length === 1 ? matches[0] : undefined;
+  };
+
   const describe = (value: unknown): string => {
     const capability = capabilityOf.get(value);
     if (capability) {
@@ -435,15 +546,12 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
     if (typeof value === "function") {
       const source = Function.prototype.toString.call(value);
       const signature = /^[^(]*\(([^)]*)\)/.exec(source)?.[1] ?? "";
-      const doc = source
-        .split("\n")
-        .map((line) =>
-          line
-            .trim()
-            .replace(/^\/\*\*?|\*\/$|\*$/g, "")
-            .trim(),
-        )
-        .find((line, index) => index > 0 && line.length > 0 && !line.startsWith("//"));
+      // Only a COMMENT counts as documentation. Reporting the first body line
+      // instead would present code as if it were an explanation, which is worse
+      // than reporting nothing: the model reads it as the author's intent.
+      // The author's own description wins; a comment inside the function is the
+      // fallback for a function that was never persisted as a definition.
+      const doc = docs.get(value.name) ?? firstComment(source);
       return [
         `${value.name || "anonymous"}(${signature})`,
         doc ? `  ${doc}` : "",
@@ -457,16 +565,25 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
       const entries = Object.entries(value as Record<string, unknown>).filter(
         ([key]) => !key.startsWith("_"),
       );
-      if (entries.length === 0) return "(no public members)";
-      return entries
-        .map(([key, member]) => {
+      const name = nameOf(value);
+      const doc = name === undefined ? undefined : docs.get(name);
+      const heading = doc === undefined ? [] : [doc];
+      if (entries.length === 0) return [...heading, "(no public members)"].join("\n");
+      return [
+        ...heading,
+        ...entries.map(([key, member]) => {
           const kind = typeof member;
           return `  ${key}: ${kind === "function" ? "function" : kind}`;
-        })
-        .join("\n");
+        }),
+      ].join("\n");
     }
 
-    return `${typeof value} ${render(value)}`.trim();
+    // A documented definition reports its description whatever its kind, since
+    // the author wrote it for the thing, not for its type.
+    const name = nameOf(value);
+    const doc = name === undefined ? undefined : docs.get(name);
+    const rendered = `${typeof value} ${render(value)}`.trim();
+    return doc === undefined ? rendered : `${rendered}\n  ${doc}`;
   };
 
   // ------------------------------------------------------------- persistence
@@ -474,13 +591,20 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
   const fileFor = (name: string): string => path.join(dir, `${name}.js`);
 
   const save = (definition: Definition): void => {
+    // The author's comment goes directly above the code, and the harness's own
+    // note goes BELOW it. Anything above the assignment is read back as the
+    // author's description, so a note of ours placed there would be reported as
+    // theirs — which is exactly what happened.
     const body = [
-      `// Definition ${JSON.stringify(definition.name)} — saved by the code harness.`,
-      `// Persisted so a restart rebuilds this tool without replaying any work.`,
+      ...(definition.doc ? [`// ${definition.doc}`] : []),
       definition.source,
+      "",
+      `// Saved by the code harness from a definition of ${JSON.stringify(definition.name)}.`,
+      "// Definitions persist across calls and restarts; work is never replayed.",
       "",
     ].join("\n");
     fs.writeFileSync(fileFor(definition.name), body, "utf8");
+    if (definition.doc) docs.set(definition.name, definition.doc);
   };
 
   const forget = (name: string): boolean => {
@@ -489,6 +613,9 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
     // Recorded so a definition made in the SAME call is not written back after
     // being forgotten.
     forgotten.add(name);
+    // And its description goes, or a name defined again later would inherit the
+    // old author's words.
+    docs.delete(name);
 
     let removed: boolean;
     try {
@@ -518,6 +645,9 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
   /** Names forgotten during the current call. */
   const forgotten = new Set<string>();
 
+  /** Documentation the author wrote above a definition, by name. */
+  const docs = new Map<string, string>();
+
   const kept = (): string[] =>
     fs
       .readdirSync(dir)
@@ -531,7 +661,10 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
     const broken: string[] = [];
     for (const name of kept()) {
       try {
-        vm.runInContext(fs.readFileSync(fileFor(name), "utf8"), context);
+        const saved = fs.readFileSync(fileFor(name), "utf8");
+        const doc = docFromSavedFile(saved);
+        if (doc !== undefined) docs.set(name, doc);
+        vm.runInContext(saved, context);
       } catch (error) {
         broken.push(`${name}: ${(error as Error).message}`);
       }
@@ -593,11 +726,14 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
     const session = sessionFor(sessionId);
 
     let ast: acorn.Program;
+    /** Comments from the parse, so a declaration's own description can be found. */
+    const comments: { start: number; end: number; value: string }[] = [];
     try {
       ast = acorn.parse(code, {
         ecmaVersion: "latest",
         sourceType: "script",
         allowAwaitOutsideFunction: true,
+        onComment: (_block, value, start, end) => comments.push({ start, end, value }),
       });
     } catch (error) {
       return `Syntax error: ${(error as Error).message}\n\nNothing ran.`;
@@ -606,8 +742,17 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
     const definitions: Definition[] = [];
     const work: acorn.Node[] = [];
     for (const statement of ast.body) {
-      if (isDefinition(statement)) definitions.push(...persistable(code, statement));
-      else work.push(statement);
+      if (!isDefinition(statement)) {
+        work.push(statement);
+        continue;
+      }
+      // A comment immediately above the declaration is the author's description
+      // of it. Without this it would be dropped, and `describe` would report the
+      // helper with no explanation at all.
+      const doc = leadingComment(comments, code, statement.start);
+      for (const definition of persistable(code, statement)) {
+        definitions.push(doc === undefined ? definition : { ...definition, doc });
+      }
     }
 
     // Fresh per call: `result` is a return channel, not state that leaks.

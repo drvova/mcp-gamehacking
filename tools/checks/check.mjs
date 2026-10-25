@@ -392,6 +392,74 @@ const gates = {
     });
   },
 
+  async "helper-identity"() {
+    await gate("helper-identity", async (dir) => {
+      const session = await openSession({ env: envFor(dir) });
+      try {
+        // Found by driving the live host: the helper worked but had lost its
+        // name, and `describe` reported a body line as documentation. Both make
+        // the discovery surface lie about the model's own tools.
+        await run(session, "/** Build a short briefing. */\nconst briefing = async (q) => q;");
+        const described = await run(session, "describe(briefing)");
+        assert(/^briefing\(/.test(described), `the helper lost its name: ${described}`);
+        assert(
+          described.includes("Build a short briefing."),
+          `the author's description was dropped: ${described}`,
+        );
+        assert(!/=>/.test(described), `a body line was reported as documentation: ${described}`);
+
+        // A helper with no description reports none, rather than borrowing one.
+        await run(session, "const undescribed = (x) => x;");
+        const bare = await run(session, "describe(undescribed)");
+        assert(!/=>|return|const /.test(bare), `a body line was reported: ${bare}`);
+
+        // And a comment above an EARLIER statement is not stolen.
+        await run(session, "const earlier = 1;\n/** Belongs to later. */\nconst later = (x) => x;");
+        assert(
+          !(await run(session, "describe(earlier)")).includes("Belongs to later."),
+          "a comment was attached to the wrong declaration",
+        );
+
+        // A statement between a comment and a definition means the comment is
+        // not that definition's: only whitespace may separate them.
+        await run(
+          session,
+          "/** Documents first. */\nconst first = 1;\nconst between = 2;\nconst after = 3;",
+        );
+        assert(
+          (await run(session, "describe(first)")).includes("Documents first."),
+          "a comment was not attached to its own declaration",
+        );
+        for (const name of ["between", "after"]) {
+          assert(
+            !(await run(session, `describe(${name})`)).includes("Documents first."),
+            `a comment was stolen by ${name}`,
+          );
+        }
+      } finally {
+        session.close();
+      }
+
+      // The description survives a restart, and forget drops it.
+      const second = await openSession({ env: envFor(dir) });
+      try {
+        assert(
+          (await run(second, "describe(briefing)")).includes("Build a short briefing."),
+          "the description did not survive a restart",
+        );
+        await run(second, 'forget("briefing")');
+        await run(second, "const briefing = (q) => q;");
+        assert(
+          !(await run(second, "describe(briefing)")).includes("Build a short briefing."),
+          "a redefined name inherited the previous description",
+        );
+      } finally {
+        second.close();
+      }
+      pass("helper-identity");
+    });
+  },
+
   async "run-semantics"() {
     await gate("run-semantics", async (dir) => {
       const session = await openSession({ env: envFor(dir) });

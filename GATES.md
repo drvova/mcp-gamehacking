@@ -55,6 +55,12 @@ from inside that namespace rather than advertised as verbs.
   CHECK: node tools/checks/check.mjs run-semantics
   EXPECT: gate-passed:run-semantics
 
+## A helper keeps its own identity
+
+- [x] G14: A helper keeps the name it was defined with, reports the description its author wrote (and never a line of its own body), reports nothing when none was written, does not steal a comment that belongs to another declaration, keeps its description across a restart, and drops it on `forget`
+  CHECK: node tools/checks/check.mjs helper-identity
+  EXPECT: gate-passed:helper-identity
+
 ## Persistence on disk
 
 - [x] G8: A definition made in one process is reloaded and usable in a **fresh process** on the same directory; `forget` removes it live and on disk, and it stays gone after a restart
@@ -105,3 +111,8 @@ from inside that namespace rather than advertised as verbs.
 | G11 | seed only a subset of the capabilities | `missing: compare_projects, ...` |
 | G12 | skip the capability's schema validation | `bad arguments were not explained` |
 | G13 | make the index total depend on how many calls are in flight | `the index total varied: ...` (not reproducible today — see the note) |
+| G14 | persist by assignment without setting the name | `the helper lost its name: anonymous(q)` |
+| G14 | report the first body line as the description | `the author's description was dropped: briefing(q)` |
+| G14 | attach any earlier comment to a declaration | `a comment was stolen by between` |
+| G14 | let `forget` keep the description | `a redefined name inherited the previous description` |
+| G14 | read descriptions only for functions | `a comment was not attached to its own declaration` |
