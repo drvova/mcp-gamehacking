@@ -169,6 +169,8 @@ async function openSession(clientName = "gate-probe") {
   });
 
   const pending = new Map();
+  /** Notification methods the server has sent, in order. */
+  const notifications = [];
   let buffer = "";
   let stderr = "";
 
@@ -187,6 +189,15 @@ async function openSession(clientName = "gate-probe") {
       } catch {
         continue;
       }
+      // Checked before anything else: a notification has a method and no id, so
+      // a filter that expects a reply would discard it and the announcement
+      // would be invisible to this harness.
+      const asNotification = frame;
+      if (typeof asNotification.method === "string" && asNotification.id === undefined) {
+        notifications.push(asNotification.method);
+        continue;
+      }
+
       const settle = pending.get(frame.id);
       if (settle) {
         pending.delete(frame.id);
@@ -217,7 +228,7 @@ async function openSession(clientName = "gate-probe") {
   }
   child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
 
-  return { request, close: () => child.kill() };
+  return { request, notifications, close: () => child.kill() };
 }
 
 function listTools(id, meta) {
@@ -2461,6 +2472,85 @@ const CHECKS = {
     }
 
     pass("views-agree");
+  },
+
+  async "list-changed"() {
+    // The mount limitation this whole arc started from: a host that reads the
+    // tool list at session start only ever sees the seed, so a surface composed
+    // later is unreachable. MCP's standard answer is to declare
+    // `tools.listChanged` and send the notification — and it only helps if a host
+    // can rely on it, which means it must be exactly right: announced on a
+    // change, never on a read, never when the change was refused.
+    const session = await openSession();
+    try {
+      // (1) Declared. Without the declaration a conforming host may ignore the
+      // notification, which would leave the composed surface unreachable anyway.
+      const init = await session.request({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "gate-probe", version: "1" },
+        },
+      });
+      assert(
+        init?.result?.capabilities?.tools?.listChanged === true,
+        "the server does not declare that its tool list can change",
+      );
+
+      // (2) Silent on a read. A notification on every read would make a host
+      // re-list constantly, and a signal that fires when nothing changed is one a
+      // host learns to ignore.
+      session.notifications.length = 0;
+      await session.request(toolCall(1, "surface"));
+      await session.request(toolCall(2, "surface", { list: "tools" }));
+      await session.request(toolCall(3, "surface", { detail: "read_agent" }));
+      assert(
+        session.notifications.length === 0,
+        `a read announced a change: ${session.notifications.join(",")}`,
+      );
+
+      // (3) Announced on a compose, and the list a host would fetch now is the
+      // one the report just described.
+      session.notifications.length = 0;
+      const report = textOf(
+        await session.request(toolCall(4, "surface", { pick: ["read_agent"] })),
+      );
+      assert(/Surface: Picked/.test(report), "the compose report is wrong");
+      assert(
+        session.notifications.includes("notifications/tools/list_changed"),
+        "composing a surface announced nothing, so a host would never re-list",
+      );
+      assert(
+        JSON.stringify(toolNames(await session.request(listTools(5)))) ===
+          JSON.stringify(["read_agent", "surface"]),
+        "the list a host fetches after the announcement is not the composed surface",
+      );
+
+      // (4) Announced on a clear.
+      session.notifications.length = 0;
+      await session.request(toolCall(6, "surface", { set: "auto" }));
+      assert(
+        session.notifications.includes("notifications/tools/list_changed"),
+        "clearing a surface announced nothing",
+      );
+
+      // (5) Silent when a change was REFUSED. Nothing changed, so a host that
+      // re-listed would fetch the same list it already had.
+      session.notifications.length = 0;
+      const refused = await session.request(toolCall(7, "surface", { pick: ["no_such_tool"] }));
+      assert(Boolean(refused?.result?.isError), "the refusal did not happen");
+      assert(
+        session.notifications.length === 0,
+        `a refused change announced something: ${session.notifications.join(",")}`,
+      );
+    } finally {
+      session.close();
+    }
+
+    pass("list-changed");
   },
 
   ledger: checkLedger,

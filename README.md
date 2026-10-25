@@ -365,6 +365,27 @@ that got no answer at all. Three consequences of that rule:
 `head` with `tail` is refused as ambiguous, and a pattern that will not compile is
 refused by name — a rule that cannot do what it says is worse than no rule.
 
+### Reaching a host that reads the list once
+
+A host that reads `tools/list` at session start only ever sees the seed, so a
+surface composed later would be unreachable — the model composes into a void.
+
+MCP's standard answer applies, and this server implements it:
+
+- `tools.listChanged` is declared in the initialize response, so a conforming
+  host knows to re-list;
+- `notifications/tools/list_changed` is sent whenever the surface actually
+  changes — on `pick`, on `set`, on `save`;
+- and **never** on a read, and **never** when a change was refused. A signal that
+  fires when nothing changed is one a host learns to ignore.
+
+The notification goes out after the report is built, so a host that re-lists
+immediately fetches the surface the report just described.
+
+A host that ignores the notification still works: the report says what changed,
+and every registered tool stays callable by name. The announcement makes the
+composed surface _reachable_; it is not what makes it _work_.
+
 ### What cannot be changed
 
 Three guards protect the floor, each because removing it takes away the way back:

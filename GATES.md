@@ -115,3 +115,7 @@ Scope: A model builds its own tooling. The server ships no base of tools and no 
 - [x] G26: Every view of a surface agrees — the listing, the catalogue, the surface report and the detail view name the same carried set, and the listing declares the same chain, shaping and fixed arguments the detail view reports
   CHECK: node tools/checks/check.mjs views-agree
   EXPECT: gate-passed:views-agree
+
+- [x] G27: The server announces a changed tool list — `tools.listChanged` is declared, the notification is sent on a compose and a clear, never on a read, and never when the change was refused
+  CHECK: node tools/checks/check.mjs list-changed
+  EXPECT: gate-passed:list-changed

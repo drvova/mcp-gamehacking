@@ -430,6 +430,12 @@ const server = new McpServer(
     version: PKG_VERSION,
   },
   {
+    // The tool list is not fixed: a caller composes its own surface at runtime,
+    // and a host has to re-list for that surface to be reachable. The SDK already
+    // declares this, but it is stated here anyway: it is a load-bearing contract
+    // for this server, not an incidental default, and a host that ignores the
+    // announcement leaves a composed surface unreachable.
+    capabilities: { tools: { listChanged: true } },
     instructions:
       "Knowledge base for game hacking and reverse engineering: 4,160 skills, 75 agents, 161 subagents, 114 plugins and 148 prompts, including full source archives for roughly 3,980 projects.\n\n" +
       "The tool surface is not fixed, and it is not chosen for you. Models do not work equally well on the same tools, so no base set suits everyone; you start with one tool and no working set. Call `surface` with no arguments to see every tool that exists, then build your own working set with `pick` and write it down with `save`.\n\n" +
@@ -3122,6 +3128,11 @@ server.tool(
     const clientName = server.server.getClientVersion()?.name ?? null;
     const notes: string[] = [];
 
+    // Whether the surface changed in a way a host would need to re-list for. A
+    // composed surface is only reachable if the host learns the list changed;
+    // without this the model composes into a void and keeps seeing the old set.
+    let changed = false;
+
     // Apply any change before resolving, so the report describes the surface the
     // caller now has rather than the one they just left.
     if (pick !== undefined) {
@@ -3132,12 +3143,14 @@ server.tool(
       const outcome = await pickSurface(pick, manifest.mutatingArgs);
       if ("failure" in outcome) return err(outcome.failure);
       setSessionSurface({ kind: "picked", profile: outcome.profile });
+      changed = true;
       if (outcome.unknown.length) {
         notes.push(`Ignored unknown tool names: ${outcome.unknown.join(", ")}.`);
       }
     } else if (set !== undefined) {
       const failure = await applySurface(set);
       if (failure !== null) return err(failure);
+      changed = true;
     }
 
     const session = getSessionSurface();
@@ -3168,6 +3181,18 @@ server.tool(
       core,
       resolved.mutatingArgs,
     );
+
+    // Announced last, so a host that re-lists immediately sees the surface this
+    // report just described rather than the one it replaced.
+    if (changed) {
+      try {
+        server.server.sendToolListChanged();
+      } catch {
+        // A transport that cannot carry the notification is not a reason to fail
+        // the call: the surface HAS changed, and the caller's report says so.
+      }
+    }
+
     return ok(notes.length ? `${notes.join("\n")}\n\n${report}` : report);
   },
 );

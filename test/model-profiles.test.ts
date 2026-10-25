@@ -2165,3 +2165,97 @@ describe("detail agrees with the catalogue", () => {
     }
   });
 });
+
+describe("the server announces a changed tool list", () => {
+  // The mount limitation that started this whole arc: a host that reads the tool
+  // list at session start only ever sees the seed, so a surface composed later is
+  // unreachable. MCP has a standard answer — declare `tools.listChanged` and send
+  // `notifications/tools/list_changed` — and it only helps if a host can rely on
+  // it, which means it has to be exactly right: announced on a change, never on a
+  // read, and never when the change was refused.
+  it("declares that the tool list can change", async () => {
+    const session = await openSession();
+    try {
+      // Without the declaration a conforming host may ignore the notification
+      // entirely, which would leave the composed surface unreachable anyway.
+      const init = await session.request({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "probe", version: "1" },
+        },
+      });
+
+      expect(init.result?.capabilities?.tools?.listChanged).toBe(true);
+    } finally {
+      session.close();
+    }
+  });
+
+  it("announces a compose and a clear", async () => {
+    const session = await openSession();
+    try {
+      session.notifications.length = 0;
+      await session.request(toolCall(1, "surface", { pick: ["read_agent"] }));
+      expect(session.notifications).toContain("notifications/tools/list_changed");
+
+      session.notifications.length = 0;
+      await session.request(toolCall(2, "surface", { set: "auto" }));
+      expect(session.notifications).toContain("notifications/tools/list_changed");
+    } finally {
+      session.close();
+    }
+  });
+
+  it("stays silent on a read", async () => {
+    const session = await openSession();
+    try {
+      session.notifications.length = 0;
+      await session.request(toolCall(1, "surface"));
+      await session.request(toolCall(2, "surface", { list: "tools" }));
+      await session.request(toolCall(3, "surface", { detail: "read_agent" }));
+
+      // A notification on every read would make a host re-list constantly, and a
+      // signal that fires when nothing changed is one a host learns to ignore.
+      expect(session.notifications).toHaveLength(0);
+    } finally {
+      session.close();
+    }
+  });
+
+  it("stays silent when a change was refused", async () => {
+    const session = await openSession();
+    try {
+      session.notifications.length = 0;
+      const refused = await session.request(toolCall(1, "surface", { pick: ["no_such_tool"] }));
+
+      expect(wasRefused(refused)).toBe(true);
+      // Nothing changed, so nothing is announced: a host that re-listed here
+      // would fetch the same list it already had.
+      expect(session.notifications).toHaveLength(0);
+    } finally {
+      session.close();
+    }
+  });
+
+  it("announces after the report, so a re-list sees the surface just described", async () => {
+    const session = await openSession();
+    try {
+      session.notifications.length = 0;
+      const report = textOf(
+        await session.request(toolCall(1, "surface", { pick: ["read_agent"] })),
+      );
+
+      expect(report).toMatch(/Surface: Picked/);
+      expect(session.notifications).toContain("notifications/tools/list_changed");
+
+      // And the list a host would fetch now is the one the report described.
+      expect(toolNames(await session.request(listTools(2)))).toEqual(["read_agent", "surface"]);
+    } finally {
+      session.close();
+    }
+  });
+});

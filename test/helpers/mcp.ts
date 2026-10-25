@@ -243,6 +243,8 @@ export function wasRefused(frame: Frame | undefined): boolean {
 export type Session = {
   /** Send one request and wait for its response before returning. */
   request: (request: object) => Promise<Frame>;
+  /** Notification methods the server has sent, in order. */
+  notifications: string[];
   close: () => void;
 };
 
@@ -264,6 +266,14 @@ export async function openSession(options: CallOptions = {}): Promise<Session> {
 
   const pending = new Map<number, (frame: Frame) => void>();
   const failures = new Map<number, (error: Error) => void>();
+  /**
+   * Notification methods the server has sent, in order.
+   *
+   * A server can announce that the tool list changed, and a host that honours it
+   * re-lists. Without a way to observe that, the announcement is untestable — and
+   * an untestable announcement is one nobody can rely on.
+   */
+  const notifications: string[] = [];
   let buffer = "";
   let stderr = "";
 
@@ -283,6 +293,15 @@ export async function openSession(options: CallOptions = {}): Promise<Session> {
       } catch {
         continue;
       }
+      // A notification is checked BEFORE the frame parse, because it carries a
+      // method and no id — and `Frame` requires a numeric id, so it would be
+      // rejected and dropped silently, making the announcement invisible.
+      const asNotification = decoded as { method?: unknown; id?: unknown };
+      if (typeof asNotification.method === "string" && asNotification.id === undefined) {
+        notifications.push(asNotification.method);
+        continue;
+      }
+
       const frame = Frame.safeParse(decoded);
       if (!frame.success) continue;
 
@@ -330,5 +349,5 @@ export async function openSession(options: CallOptions = {}): Promise<Session> {
   });
   child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
 
-  return { request, close: () => child.kill() };
+  return { request, notifications, close: () => child.kill() };
 }
