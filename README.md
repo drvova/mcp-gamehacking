@@ -233,6 +233,55 @@ does.
 name even when your surface does not carry it, so you can finish a task first and
 shape your surface afterwards. `surface` always shows the delta.
 
+### Chaining tools
+
+A chain is a declaration, not a program. Fixed sequence, no branching, at most
+three steps, each running at most three times:
+
+```
+surface { pick: [
+  { tool: "search_skills", as: "find_and_read",
+    args: { limit: 3 },
+    then: [{ tool: "read_skill", extract: { name: "- \\*\\*([^*]+)\\*\\*" } }],
+    output: { head: 6 } }
+] }
+```
+
+Each step receives values pulled out of the previous answer, keyed by the
+argument they fill. A pattern with a capture group targets part of a line; one
+without yields the whole match.
+
+```
+[chain] search_skills → read_skill
+[2] read_skill(name=ags-eddeeh-kdmapper) → 1072 chars
+
+# ags-eddeeh-kdmapper
+...
+```
+
+**The trace is not decoration.** It says which step ran, with what, and how much
+came back — which is the difference between a chain a model can debug and one it
+cannot see into. It names the tool that actually ran, so a step calling a tool the
+surface defined never hides behind its alias.
+
+`take: 2` fans out — one call per match, each result labelled, because a content
+rule that stripped the labels would leave several results with no way to tell
+which is which.
+
+Five things are refused rather than half-run, and each says which step and why:
+
+| what went wrong                         | what happens                                              |
+| --------------------------------------- | --------------------------------------------------------- |
+| a step returns an error                 | the chain stops, that step is named, its error shown      |
+| an extraction matches nothing           | the chain stops; the **pattern and the answer** are shown |
+| fewer matched than `take`               | it runs what it has and **says so**                       |
+| a chain inside a chain                  | refused: nesting makes a sequence something to work out   |
+| a step naming nothing, or a bad pattern | refused before anything runs, all faults at once          |
+
+The last two matter most. A chain that half-runs and says nothing useful is worse
+than one that never started, and silently reading one of the three things you
+asked for is the kind of lie this design keeps refusing to tell.
+
 ### Shaping the answer
 
 The mirror of shaping the call. A tool that returns a thousand lines is unusable;

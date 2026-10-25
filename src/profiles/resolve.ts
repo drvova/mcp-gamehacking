@@ -217,6 +217,39 @@ export function effectiveDerived<T extends ShapeableTool>(
     });
     if (baseViolation) continue;
 
+    // A step whose tool does not exist, whose pattern will not compile, or whose
+    // extracted name is not an argument of that tool cannot run. Each is refused
+    // with the reason rather than failing later with the chain half-executed.
+    for (const step of entry.then) {
+      // A step may call a registered tool OR one this surface defined, which is
+      // what lets a chain end in a tool the model built for itself.
+      const alias = profile.tools.derived.find((candidate) => candidate.as === step.tool);
+      const target = byName.get(step.tool) ?? (alias ? byName.get(alias.tool) : undefined);
+      if (target === undefined) continue;
+
+      // A step may call a defined tool, but not a CHAIN. Running one chain
+      // inside another would make the sequence something to work out rather
+      // than read, and would let a small surface hide an unbounded amount of
+      // work behind a single name.
+      if (alias !== undefined && alias.then.length > 0) continue;
+
+      const targetProperties = target.inputSchema?.properties;
+      const names = Object.keys(step.extract);
+      if (
+        targetProperties !== undefined &&
+        targetProperties !== null &&
+        typeof targetProperties === "object" &&
+        names.some((key) => !(key in targetProperties))
+      ) {
+        continue;
+      }
+
+      const badPattern = Object.values(step.extract)
+        .map((pattern) => compilePattern(pattern))
+        .find((compiled) => "problem" in compiled);
+      if (badPattern !== undefined && "problem" in badPattern) continue;
+    }
+
     // A pattern that will not compile shapes nothing, and a head together with a
     // tail is ambiguous about which end wins. Both are refused at construction so
     // the model is told rather than left with a rule that quietly does nothing.
@@ -373,6 +406,67 @@ export function compilePattern(pattern: string): { regex: RegExp } | { problem: 
   }
 }
 
+/**
+ * Pull values out of a step's answer.
+ *
+ * The first capture group is used when the pattern has one, so a pattern can
+ * target the part that matters inside a line instead of the whole line; a
+ * pattern with no group yields the whole match.
+ *
+ * The cap is not a nicety. A pattern that matches every line of a large answer
+ * would otherwise pull tens of thousands of values and try to call a tool with
+ * each of them.
+ */
+export function extractValues(
+  text: string,
+  pattern: string,
+): { values: string[] } | { problem: string } {
+  const compiled = compilePattern(pattern);
+  if ("problem" in compiled) return compiled;
+
+  const flags = compiled.regex.flags.includes("g")
+    ? compiled.regex.flags
+    : `${compiled.regex.flags}g`;
+  const scan = new RegExp(compiled.regex.source, flags);
+
+  const values: string[] = [];
+  const MAX_VALUES = 50;
+
+  let match = scan.exec(text);
+  while (match !== null && values.length < MAX_VALUES) {
+    values.push((match[1] ?? match[0]).trim());
+    // A pattern that can match nothing would otherwise spin on the same spot.
+    if (match[0].length === 0) scan.lastIndex += 1;
+    match = scan.exec(text);
+  }
+
+  return { values };
+}
+
+/** Whether a chain would run anything. */
+export function hasChain(entry: ModelProfile["tools"]["derived"][number]): boolean {
+  return entry.then.length > 0;
+}
+
+/** A value written short enough to sit in a one-line trace. */
+function brief(value: unknown): string {
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  return text !== undefined && text.length > 40 ? `${text.slice(0, 37)}...` : (text ?? "null");
+}
+
+/** One line describing what a step was called with, for the chain trace. */
+export function describeStep(
+  index: number,
+  tool: string,
+  args: Record<string, unknown>,
+  chars: number,
+): string {
+  const shown = Object.entries(args)
+    .map(([key, value]) => `${key}=${brief(value)}`)
+    .join(", ");
+  return `[${index}] ${tool}(${shown}) → ${chars} chars`;
+}
+
 /** Whether a shaping rule would do anything. */
 export function hasShaping(rule: ModelProfile["tools"]["derived"][number]["output"]): boolean {
   if (rule === undefined) return false;
@@ -497,6 +591,22 @@ function describeDerived(
     const shown = fixed.map(([key, value]) => `${key}=${JSON.stringify(value)}`).join(", ");
     const pronoun = fixed.length === 1 ? "it" : "them";
     lines.push(`Already set for you: ${shown}. Omit ${pronoun} when you call.`);
+  }
+
+  // The listing has to say a tool CHAINS, not only the chain trace. A model that
+  // expects a search result and receives a document has been misled about the
+  // tool, and the fix is the same as for shaping: say it before the call.
+  if (hasChain(entry)) {
+    const described = entry.then.map((step) => {
+      const into = Object.keys(step.extract);
+      const target = into.length > 0 ? `${step.tool}(${into.join(", ")})` : step.tool;
+      return step.take > 1 ? `${target} ×${step.take}` : target;
+    });
+    lines.push(
+      `Runs a chain: this tool, then ${described.join(", then ")}. ` +
+        "Each step receives values pulled from the previous answer. Every answer " +
+        "opens with the chain trace, so what ran is always visible.",
+    );
   }
 
   // The listing has to say a tool truncates, not only the result. A model that

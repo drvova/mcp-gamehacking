@@ -1096,3 +1096,338 @@ describe("the listing declares what a tool does", () => {
     }
   });
 });
+
+describe("chains", () => {
+  // A chain is a declaration, not a program: fixed sequence, no branching, and
+  // every failure names the step. A model can debug a sequence it can read.
+  //
+  // These chain `list_agents` into `read_agent`, which read the committed
+  // agents/ tree. An archive-backed pair would assert against "not present" on a
+  // CI checkout, which is how an earlier suite failed the runner while passing
+  // locally.
+  const AGENT_NAME = "- \\*\\*([^*]+)\\*\\*";
+
+  it("feeds one tool's answer into the next and shows what ran", async () => {
+    const session = await openSession();
+    try {
+      const composed = await session.request(
+        toolCall(1, "surface", {
+          pick: [
+            {
+              tool: "list_agents",
+              as: "first_agent",
+              then: [{ tool: "read_agent", extract: { name: AGENT_NAME } }],
+              output: { head: 6 },
+            },
+          ],
+        }),
+      );
+      expect(wasRefused(composed)).toBe(false);
+
+      const answered = await session.request(toolCall(2, "first_agent", {}));
+      const text = textOf(answered);
+
+      // The trace is what makes a chain debuggable: which step ran, with what,
+      // and how much came back.
+      expect(text).toContain("[chain] list_agents → read_agent");
+      expect(text).toMatch(/\[2\] read_agent\(name=[a-z0-9-]+\) → \d+ chars/);
+      expect(text).toContain("# Agent: ");
+    } finally {
+      session.close();
+    }
+  });
+
+  it("fans out when take is more than one, labelling each result", async () => {
+    const session = await openSession();
+    try {
+      await session.request(
+        toolCall(1, "surface", {
+          pick: [
+            {
+              tool: "list_agents",
+              as: "two_agents",
+              then: [{ tool: "read_agent", extract: { name: AGENT_NAME }, take: 2 }],
+              output: { sections: ["Core Capabilities"] },
+            },
+          ],
+        }),
+      );
+
+      const text = textOf(await session.request(toolCall(2, "two_agents", {})));
+
+      // Each fanned-out result carries a label. A content rule must not be able
+      // to strip it: without labels the model cannot tell which is which.
+      const labels = text.match(/--- name=[a-z0-9-]+ ---/g) ?? [];
+      expect(labels).toHaveLength(2);
+      expect(text).toMatch(/\[2\] read_agent\(name=[a-z0-9-]+\)/);
+    } finally {
+      session.close();
+    }
+  });
+
+  it("stops and names the step when a step fails", async () => {
+    const session = await openSession();
+    try {
+      // "Available" is not an agent, so the step errors rather than the
+      // extraction failing — a different failure path from the one below.
+      await session.request(
+        toolCall(1, "surface", {
+          pick: [
+            {
+              tool: "list_agents",
+              as: "broken",
+              then: [{ tool: "read_agent", extract: { name: "(Available)" } }],
+            },
+          ],
+        }),
+      );
+
+      const failed = await session.request(toolCall(2, "broken", {}));
+      expect(wasRefused(failed)).toBe(true);
+      expect(textOf(failed)).toMatch(/Step 2 \(read_agent\) failed/);
+      expect(textOf(failed)).toContain("Available");
+    } finally {
+      session.close();
+    }
+  });
+
+  it("stops and shows the answer when an extraction matches nothing", async () => {
+    const session = await openSession();
+    try {
+      await session.request(
+        toolCall(1, "surface", {
+          pick: [
+            {
+              tool: "list_agents",
+              as: "nomatch",
+              then: [{ tool: "read_agent", extract: { name: "- NOPE ([^*]+)" } }],
+            },
+          ],
+        }),
+      );
+
+      const failed = await session.request(toolCall(2, "nomatch", {}));
+      expect(wasRefused(failed)).toBe(true);
+
+      // The pattern AND the answer it was matched against, because that is what
+      // the model needs in order to fix the pattern.
+      expect(textOf(failed)).toContain("NOPE");
+      expect(textOf(failed)).toContain("Available agents");
+    } finally {
+      session.close();
+    }
+  });
+
+  it("runs what it has and says so when fewer matched than asked", async () => {
+    const session = await openSession();
+    try {
+      await session.request(
+        toolCall(1, "surface", {
+          pick: [
+            {
+              tool: "list_agents",
+              as: "short",
+              then: [
+                {
+                  tool: "read_agent",
+                  extract: { name: "- \\*\\*(anti-cheat-analyst)\\*\\*" },
+                  take: 3,
+                },
+              ],
+              output: { head: 2 },
+            },
+          ],
+        }),
+      );
+
+      const text = textOf(await session.request(toolCall(2, "short", {})));
+      expect(text).toMatch(/asked for 3, only 1 matched/);
+    } finally {
+      session.close();
+    }
+  });
+
+  it("can call a tool this same surface defined", async () => {
+    const session = await openSession();
+    try {
+      await session.request(
+        toolCall(1, "surface", {
+          pick: [
+            { tool: "read_agent", as: "read_pinned", args: { name: "exploit-developer" } },
+            {
+              tool: "list_agents",
+              as: "flow",
+              then: [{ tool: "read_pinned" }],
+            },
+          ],
+        }),
+      );
+
+      const text = textOf(await session.request(toolCall(2, "flow", {})));
+
+      // The trace names the RESOLVED tool, so what actually ran is never hidden
+      // behind an alias.
+      expect(text).toContain("[chain] list_agents → read_pinned");
+      expect(text).toMatch(/\[2\] read_agent\(name=exploit-developer\)/);
+      expect(text).toContain("# Agent: exploit-developer");
+    } finally {
+      session.close();
+    }
+  });
+
+  it("declares the chain in the listing, before it is called", async () => {
+    const session = await openSession();
+    try {
+      await session.request(
+        toolCall(1, "surface", {
+          pick: [
+            {
+              tool: "list_agents",
+              as: "two_agents",
+              then: [{ tool: "read_agent", extract: { name: AGENT_NAME }, take: 2 }],
+            },
+          ],
+        }),
+      );
+
+      const tool = ((await session.request(listTools(2)))?.result?.tools ?? []).find(
+        (entry) => entry.name === "two_agents",
+      );
+      expect(tool?.description).toContain("Runs a chain");
+      expect(tool?.description).toContain("read_agent(name)");
+    } finally {
+      session.close();
+    }
+  });
+
+  it("refuses a chain that nests inside another chain", async () => {
+    const session = await openSession();
+    try {
+      const refused = await session.request(
+        toolCall(1, "surface", {
+          pick: [
+            {
+              tool: "list_agents",
+              as: "inner",
+              then: [{ tool: "read_agent", extract: { name: AGENT_NAME } }],
+            },
+            {
+              tool: "list_agents",
+              as: "outer",
+              then: [{ tool: "inner" }],
+            },
+          ],
+        }),
+      );
+      expect(wasRefused(refused)).toBe(true);
+      expect(textOf(refused)).toMatch(/chains cannot nest/);
+    } finally {
+      session.close();
+    }
+  });
+
+  it("refuses a step naming nothing, a bad pattern, and a bad argument — all at once", async () => {
+    const session = await openSession();
+    try {
+      const refused = await session.request(
+        toolCall(1, "surface", {
+          pick: [
+            {
+              tool: "list_agents",
+              as: "many",
+              then: [
+                { tool: "no_such_tool" },
+                { tool: "read_agent", extract: { nmae: "x" } },
+                { tool: "read_agent", extract: { name: "[bad" } },
+              ],
+            },
+          ],
+        }),
+      );
+
+      const text = textOf(refused);
+      expect(wasRefused(refused)).toBe(true);
+      expect(text).toContain("no_such_tool");
+      expect(text).toContain("nmae");
+      expect(text).toContain("[bad");
+    } finally {
+      session.close();
+    }
+  });
+
+  it("survives a save and a fresh process", async () => {
+    const probe = cleanupProbe();
+    try {
+      const builder = await openSession();
+      try {
+        await builder.request(
+          toolCall(1, "surface", {
+            pick: [
+              {
+                tool: "list_agents",
+                as: "two_agents",
+                then: [{ tool: "read_agent", extract: { name: AGENT_NAME }, take: 2 }],
+                output: { sections: ["Core Capabilities"] },
+              },
+            ],
+          }),
+        );
+        expect(
+          wasRefused(
+            await builder.request(
+              toolCall(2, "surface", {
+                save: PROBE_ID,
+                guidance:
+                  "A chain saved to prove it survives a process boundary rather than living in memory.",
+              }),
+            ),
+          ),
+        ).toBe(false);
+      } finally {
+        builder.close();
+      }
+
+      const recalled = await openSession();
+      try {
+        await recalled.request(toolCall(1, "surface", { set: PROBE_ID }));
+        const text = textOf(await recalled.request(toolCall(2, "two_agents", {})));
+
+        expect(text).toContain("[chain] list_agents → read_agent");
+        expect(text.match(/--- name=[a-z0-9-]+ ---/g) ?? []).toHaveLength(2);
+      } finally {
+        recalled.close();
+      }
+    } finally {
+      cleanupProbe();
+    }
+  });
+
+  it("chains the realistic case when the skill archive is present", async () => {
+    if (!requireArchive("chains the realistic search-then-read case")) return;
+
+    const session = await openSession();
+    try {
+      await session.request(
+        toolCall(1, "surface", {
+          pick: [
+            {
+              tool: "search_skills",
+              as: "find_and_read",
+              args: { limit: 3 },
+              then: [{ tool: "read_skill", extract: { name: "- \\*\\*([^*]+)\\*\\*" } }],
+              output: { head: 6 },
+            },
+          ],
+        }),
+      );
+
+      const text = textOf(
+        await session.request(toolCall(2, "find_and_read", { query: "kdmapper" })),
+      );
+      expect(text).toContain("[chain] search_skills → read_skill");
+      expect(text).toContain("# ags-");
+    } finally {
+      session.close();
+    }
+  });
+});

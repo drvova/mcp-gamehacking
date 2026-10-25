@@ -83,3 +83,7 @@ Scope: A model builds its own tooling. The server ships no base of tools and no 
 - [x] G18: An answer can be shaped (sections, filter, reject, head, tail, maxChars) and every reduction is REPORTED, a rule that removed nothing stays silent, nothing-matched is stated rather than blank, and a failure is never shaped
   CHECK: node tools/checks/check.mjs output-shaping
   EXPECT: gate-passed:output-shaping
+
+- [x] G19: A tool can chain others — each step fed values extracted from the previous answer, fan-out with labelled results, the chain declared in the listing, and every failure (a failing step, an unmatched extraction, a short fan-out, a nested chain, a bad pattern) named rather than half-run
+  CHECK: node tools/checks/check.mjs chain
+  EXPECT: gate-passed:chain

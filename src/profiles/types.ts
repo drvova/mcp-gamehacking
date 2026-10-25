@@ -60,6 +60,32 @@ const ConstraintSchema = z.object({
   pattern: z.string().optional().describe("Regular expression the string must match"),
 });
 
+/**
+ * One step of a chain: a tool to run on what the previous step produced.
+ *
+ * A step is a declaration, not a program. There is no branching, no condition,
+ * and no way to run a step twice with different logic — the sequence is fixed
+ * and every step runs, or the chain fails and says which step failed. That is
+ * deliberate: a model can debug a fixed sequence by reading it, and cannot debug
+ * a program it did not write.
+ */
+const StepSchema = z.object({
+  /** The registered tool to run, or a tool this surface defined. */
+  tool: z.string().min(1),
+  /**
+   * Values pulled out of the previous step's answer, keyed by the argument they
+   * fill. Extraction runs on the RAW answer, never on shaped text: shaping is
+   * for the reader, and a rule meant for eyes must not decide what data flows.
+   */
+  extract: z.record(z.string(), z.string()).default({}),
+  /**
+   * How many matches to run this step for. Two or more fans out — one call per
+   * match, each with its own extracted arguments — which is how "read the top
+   * three" is expressed.
+   */
+  take: z.number().int().min(1).max(3).default(1),
+});
+
 const DerivedToolSchema = z.object({
   /** The name this derived tool answers to. */
   as: z.string().min(1),
@@ -84,6 +110,12 @@ const DerivedToolSchema = z.object({
   description: z.string().min(1).optional(),
   /** Per-argument wording for the arguments that remain. */
   argDescriptions: z.record(z.string(), z.string().min(1)).default({}),
+  /**
+   * Steps to run after this tool, feeding each step the previous answer. The
+   * chain is fixed and short by construction: at most three steps, each running
+   * at most three times.
+   */
+  then: z.array(StepSchema).max(3).default([]),
   /**
    * How much of the answer to keep. The mirror of shaping the call: a tool that
    * returns a thousand lines is unusable, and the same tool returning fifty is

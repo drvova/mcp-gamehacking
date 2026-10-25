@@ -16,6 +16,9 @@ import {
   boundArgsFor,
   checkConstraint,
   compilePattern,
+  describeStep,
+  extractValues,
+  hasChain,
   hasShaping,
   shapeOutput,
 } from "./profiles/resolve.js";
@@ -1927,6 +1930,120 @@ function installProfileAwareToolList(mcp: McpServer): boolean {
   return true;
 }
 
+/** The text of a result, before any shaping is applied to it. */
+function rawTextOf(result: ToolCallResult): string {
+  const content = result?.content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((item) => item !== null && typeof item === "object" && item.type === "text")
+    .map((item) => (typeof item.text === "string" ? item.text : ""))
+    .join("\n");
+}
+
+/**
+ * Run a chain: each step is fed values extracted from the previous answer.
+ *
+ * The four ways this can fail are all reported the same way — loudly, with the
+ * step named — because a chain that half-runs and says nothing useful is the
+ * worst outcome available. A model cannot debug a sequence it cannot see, so:
+ *
+ * - a step that returns an error stops the chain and reports that step;
+ * - an extraction that matches nothing stops the chain and shows the pattern
+ *   together with the start of the answer it was matched against, which is what
+ *   the model needs to fix the pattern;
+ * - a pattern that does not compile is refused before anything runs;
+ * - fewer matches than `take` is not a failure, but it IS reported, because
+ *   silently reading one of the three things you asked for is the kind of lie
+ *   this whole design keeps refusing to tell.
+ */
+async function runChain(
+  entry: ModelProfile["tools"]["derived"][number],
+  profile: ModelProfile,
+  registered: ToolListResult["tools"],
+  first: string,
+  call: (name: string, args: Record<string, unknown>) => ToolCallResult | Promise<ToolCallResult>,
+): Promise<{ failure: string } | { text: string; trace: string[] }> {
+  const trace: string[] = [];
+  const pieces: string[] = [];
+  let previous = first;
+
+  for (const [index, step] of entry.then.entries()) {
+    // Steps are numbered from 2: the tool this chain belongs to is step 1.
+    const position = index + 2;
+    const names = Object.keys(step.extract);
+
+    // A step may call a tool this surface defined. Its fixed arguments apply,
+    // and its own chain does not: nesting chains would make the sequence
+    // something to work out rather than read.
+    const alias = boundArgsFor(profile, step.tool, registered);
+    const targetName = alias?.tool ?? step.tool;
+
+    const perArgument = new Map<string, string[]>();
+    for (const name of names) {
+      const outcome = extractValues(previous, step.extract[name] ?? "");
+      if ("problem" in outcome) {
+        return { failure: `Step ${position} (${step.tool}): ${outcome.problem}` };
+      }
+      perArgument.set(name, outcome.values);
+    }
+
+    const matched =
+      names.length === 0 ? 1 : Math.min(...[...perArgument.values()].map((v) => v.length));
+
+    if (names.length > 0 && matched === 0) {
+      const patterns = names.map((name) => `\`${name}\` ← \`${step.extract[name]}\``).join(", ");
+      return {
+        failure:
+          `Step ${position} (${step.tool}) cannot run: nothing matched ${patterns} in the previous ` +
+          `answer, which began:\n\n${previous.slice(0, 400)}`,
+      };
+    }
+
+    const wanted = Math.min(step.take, matched);
+    if (matched < step.take) {
+      trace.push(
+        `[${position}] ${step.tool}: asked for ${step.take}, only ${matched} matched — running ${wanted}`,
+      );
+    }
+
+    const stepResults: string[] = [];
+    for (let pickIndex = 0; pickIndex < wanted; pickIndex++) {
+      const args: Record<string, unknown> = { ...(alias?.args ?? {}) };
+      for (const name of names) args[name] = perArgument.get(name)?.[pickIndex];
+
+      const answered = await call(targetName, args);
+      const text = rawTextOf(answered);
+      trace.push(describeStep(position, targetName, args, text.length));
+
+      if (answered?.isError === true) {
+        return {
+          failure: `Step ${position} (${targetName}) failed, so the chain stopped. Its error:\n\n${text}`,
+        };
+      }
+
+      // Shape each result BEFORE labelling it. A label is structure, not
+      // content: a `sections` rule that stripped it would leave several results
+      // with no way to tell which is which, which is the exact class of lie this
+      // design keeps refusing to tell. Shaping per result also means the note
+      // reports each result's own reduction rather than the total.
+      const shown = hasShaping(entry.output) ? shapeOutput(text, entry.output) : text;
+      stepResults.push(wanted > 1 ? `--- ${briefArgs(args)} ---\n${shown}` : shown);
+    }
+
+    previous = stepResults.join("\n\n");
+    pieces.push(previous);
+  }
+
+  return { text: pieces[pieces.length - 1] ?? first, trace };
+}
+
+/** A step's arguments written short, to label one of several fanned-out results. */
+function briefArgs(args: Record<string, unknown>): string {
+  return Object.entries(args)
+    .map(([key, value]) => `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`)
+    .join(", ");
+}
+
 /**
  * Make a derived tool work when it is called.
  *
@@ -1998,10 +2115,35 @@ function installProfileAwareCall(mcp: McpServer): boolean {
     // A fixed argument wins last, so nothing the caller sends can undo it.
     Object.assign(merged, entry.args);
 
+    const registered = await listRegisteredTools();
     const result = await original(
       { ...request, params: { ...request.params, name: entry.tool, arguments: merged } },
       extra,
     );
+
+    // A chain replaces the answer: the tool the caller named is step one, and
+    // what they read is where the sequence ended up.
+    if (hasChain(entry)) {
+      const chain = await runChain(
+        entry,
+        resolved.profile,
+        registered,
+        rawTextOf(result),
+        (name, args) =>
+          original({ ...request, params: { ...request.params, name, arguments: args } }, extra),
+      );
+
+      if ("failure" in chain)
+        return err(`\`${request.params.name}\` could not finish:\n\n${chain.failure}`);
+
+      const header = `[chain] ${entry.tool} → ${entry.then.map((step) => step.tool).join(" → ")}`;
+      const footer = [header, ...chain.trace].join("\n");
+
+      // No shaping here: each result was shaped as it was produced, so the
+      // labels and the trace stay outside it. The trace is what makes a chain
+      // debuggable, and a content rule must not be able to eat it.
+      return ok(`${footer}\n\n${chain.text}`);
+    }
 
     // Shape what came back, never how it failed: a truncated error hides the
     // reason for the failure, which is the one thing a caller must not lose.
@@ -2078,6 +2220,11 @@ type PickEntry =
         tail?: number;
         maxChars?: number;
       };
+      then?: Array<{
+        tool: string;
+        extract?: Record<string, string>;
+        take?: number;
+      }>;
       description?: string;
       argDescriptions?: Record<string, string>;
     };
@@ -2113,6 +2260,7 @@ async function pickSurface(
             defaults: entry.defaults,
             constrain: entry.constrain,
             output: entry.output,
+            then: entry.then,
             description: entry.description,
             argDescriptions: entry.argDescriptions,
           },
@@ -2228,6 +2376,70 @@ async function pickSurface(
       continue;
     }
 
+    // A chain step that names nothing, cannot compile its pattern, or fills an
+    // argument that does not exist would fail after the chain had already run
+    // partway. Each is refused here with the reason, so nothing is half-executed
+    // and nothing is silently dropped.
+    for (const [stepIndex, step] of (entry.then ?? []).entries()) {
+      const position = stepIndex + 2;
+
+      // A step may name a tool this same pick defines, so resolve through it.
+      const stepAlias = known
+        .filter(
+          (candidate): candidate is Extract<typeof candidate, { tool: string }> =>
+            typeof candidate !== "string",
+        )
+        .find((candidate) => (candidate.alias ?? candidate.tool) === step.tool);
+
+      const targetTool = stepAlias?.tool ?? step.tool;
+      if (!available.has(targetTool)) {
+        problems.push(
+          `step ${position} calls \`${step.tool}\`, which is neither a registered tool nor one ` +
+            "this surface defines",
+        );
+        continue;
+      }
+
+      // A step may call a defined tool, but not a chain: a fixed sequence is
+      // something a model can read and debug, and nesting makes it a program.
+      if (stepAlias?.then !== undefined && stepAlias.then.length > 0) {
+        problems.push(
+          `step ${position} calls \`${step.tool}\`, which is itself a chain; chains cannot nest, ` +
+            "because a sequence you can read is the point",
+        );
+        continue;
+      }
+
+      const targetProperties = definitions.get(targetTool)?.inputSchema?.properties;
+      const names = Object.keys(step.extract ?? {});
+      if (
+        targetProperties !== undefined &&
+        targetProperties !== null &&
+        typeof targetProperties === "object"
+      ) {
+        const bogus = names.filter((key) => !(key in targetProperties));
+        if (bogus.length > 0) {
+          const real = Object.keys(targetProperties);
+          problems.push(
+            `step ${position} extracts into ${bogus.map((key) => `\`${key}\``).join(", ")}, which ` +
+              `\`${targetTool}\` does not take; ` +
+              (real.length > 0
+                ? `it takes ${real.map((key) => `\`${key}\``).join(", ")}`
+                : "it takes no arguments"),
+          );
+          continue;
+        }
+      }
+
+      const badPattern = Object.values(step.extract ?? {})
+        .map((pattern) => compilePattern(pattern))
+        .find((compiled) => "problem" in compiled);
+      if (badPattern !== undefined && "problem" in badPattern) {
+        problems.push(`step ${position}: ${badPattern.problem}`);
+        continue;
+      }
+    }
+
     // A rule that cannot do what it says is worse than no rule: a pattern that
     // will not compile shapes nothing, and head with tail is ambiguous about
     // which end wins. Both are refused with the reason.
@@ -2268,6 +2480,7 @@ async function pickSurface(
       entry.defaults !== undefined ||
       entry.constrain !== undefined ||
       entry.output !== undefined ||
+      entry.then !== undefined ||
       entry.description !== undefined;
     if (definesSomething) {
       derived.push({
@@ -2277,6 +2490,11 @@ async function pickSurface(
         defaults: entry.defaults ?? {},
         constrain: entry.constrain ?? {},
         output: entry.output ?? {},
+        then: (entry.then ?? []).map((step) => ({
+          tool: step.tool,
+          extract: step.extract ?? {},
+          take: step.take ?? 1,
+        })),
         ...(entry.description === undefined ? {} : { description: entry.description }),
         argDescriptions: entry.argDescriptions ?? {},
       });
@@ -2538,6 +2756,35 @@ server.tool(
               .optional()
               .describe(
                 "Keep only part of the answer: named markdown sections, lines matching (or not matching) a pattern, the first or last N lines, or a character cap. The result always says how much was kept, so a shaped answer never reads as the whole truth.",
+              ),
+            then: z
+              .array(
+                z.object({
+                  tool: z
+                    .string()
+                    .min(1)
+                    .describe("The tool to run on what the previous step produced"),
+                  extract: z
+                    .record(z.string(), z.string())
+                    .optional()
+                    .describe(
+                      "Values to pull out of the previous answer, keyed by the argument they fill. Use a capture group to target part of a line. Extraction runs on the raw answer, never on shaped text.",
+                    ),
+                  take: z
+                    .number()
+                    .int()
+                    .min(1)
+                    .max(3)
+                    .optional()
+                    .describe(
+                      "How many matches to run this step for. Two or more fans out, one call per match — this is how 'read the top three' is expressed.",
+                    ),
+                }),
+              )
+              .max(3)
+              .optional()
+              .describe(
+                "Steps to run after this tool, feeding each step the previous answer. Fixed sequence, no branching: a model can debug a sequence it can read, and cannot debug a program it did not write.",
               ),
             description: z.string().min(1).optional().describe("Wording to use for it"),
             argDescriptions: z

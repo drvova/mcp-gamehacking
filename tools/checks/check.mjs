@@ -1506,6 +1506,305 @@ const CHECKS = {
     pass("output-shaping");
   },
 
+  async chain() {
+    // A chain is a declaration, not a program: fixed sequence, no branching,
+    // every failure names the step, and the trace says what ran. Chains
+    // `list_agents` into `read_agent`, which read the committed agents/ tree, so
+    // this holds on a runner without the 19 GB skill archive.
+    const AGENT_NAME = "- \\*\\*([^*]+)\\*\\*";
+    const id = "gate-probe-chain";
+    const path = cleanupProfile(id);
+
+    try {
+      // The trace: which step ran, with what, and how much came back.
+      const session = await openSession();
+      try {
+        const composed = await session.request(
+          toolCall(1, "surface", {
+            pick: [
+              {
+                tool: "list_agents",
+                as: "first_agent",
+                then: [{ tool: "read_agent", extract: { name: AGENT_NAME } }],
+                output: { head: 6 },
+              },
+            ],
+          }),
+        );
+        assert(!composed?.result?.isError, `composing the chain failed: ${textOf(composed)}`);
+
+        const answered = await session.request(toolCall(2, "first_agent", {}));
+        assert(!answered?.result?.isError, `the chain failed: ${textOf(answered)}`);
+        const text = textOf(answered);
+
+        assert(
+          text.includes("[chain] list_agents → read_agent"),
+          `the answer does not open with the chain: ${text.slice(0, 120)}`,
+        );
+        assert(
+          /\[2\] read_agent\(name=[a-z0-9-]+\) → \d+ chars/.test(text),
+          "the trace does not name the second step, its arguments and its size",
+        );
+        assert(text.includes("# Agent: "), "the second step's answer did not arrive");
+      } finally {
+        session.close();
+      }
+
+      // Fan-out: one call per match, each labelled. A content rule must not be
+      // able to strip the labels, or the model cannot tell the results apart.
+      const fanned = await openSession();
+      try {
+        await fanned.request(
+          toolCall(1, "surface", {
+            pick: [
+              {
+                tool: "list_agents",
+                as: "two_agents",
+                then: [{ tool: "read_agent", extract: { name: AGENT_NAME }, take: 2 }],
+                output: { sections: ["Core Capabilities"] },
+              },
+            ],
+          }),
+        );
+        const text = textOf(await fanned.request(toolCall(2, "two_agents", {})));
+        const labels = text.match(/--- name=[a-z0-9-]+ ---/g) ?? [];
+        assert(
+          labels.length === 2,
+          `fan-out did not label both results (found ${labels.length}); a content rule must not strip them`,
+        );
+      } finally {
+        fanned.close();
+      }
+
+      // Fewer matches than asked is not a failure, but it IS reported: silently
+      // reading one of the three things you asked for is a lie.
+      const short = await openSession();
+      try {
+        await short.request(
+          toolCall(1, "surface", {
+            pick: [
+              {
+                tool: "list_agents",
+                as: "short",
+                then: [
+                  {
+                    tool: "read_agent",
+                    extract: { name: "- \\*\\*(anti-cheat-analyst)\\*\\*" },
+                    take: 3,
+                  },
+                ],
+                output: { head: 2 },
+              },
+            ],
+          }),
+        );
+        const text = textOf(await short.request(toolCall(2, "short", {})));
+        assert(
+          /asked for 3, only 1 matched/.test(text),
+          `a short fan-out was not reported: ${text.slice(0, 160)}`,
+        );
+      } finally {
+        short.close();
+      }
+
+      // A step that fails stops the chain and names itself, with the error.
+      const broken = await openSession();
+      try {
+        await broken.request(
+          toolCall(1, "surface", {
+            pick: [
+              {
+                tool: "list_agents",
+                as: "broken",
+                then: [{ tool: "read_agent", extract: { name: "(Available)" } }],
+              },
+            ],
+          }),
+        );
+        const failed = await broken.request(toolCall(2, "broken", {}));
+        assert(Boolean(failed?.result?.isError), "a failing step did not stop the chain");
+        assert(
+          /Step 2 \(read_agent\) failed/.test(textOf(failed)),
+          `the failing step was not named: ${textOf(failed).slice(0, 160)}`,
+        );
+      } finally {
+        broken.close();
+      }
+
+      // An extraction that matches nothing stops the chain and shows the pattern
+      // AND the answer, which is what the model needs to fix the pattern.
+      const nomatch = await openSession();
+      try {
+        await nomatch.request(
+          toolCall(1, "surface", {
+            pick: [
+              {
+                tool: "list_agents",
+                as: "nomatch",
+                then: [{ tool: "read_agent", extract: { name: "- NOPE ([^*]+)" } }],
+              },
+            ],
+          }),
+        );
+        const failed = await nomatch.request(toolCall(2, "nomatch", {}));
+        assert(Boolean(failed?.result?.isError), "an unmatched extraction did not stop the chain");
+        assert(textOf(failed).includes("NOPE"), "the failing pattern was not shown");
+        assert(
+          textOf(failed).includes("Available agents"),
+          "the answer the pattern was matched against was not shown",
+        );
+      } finally {
+        nomatch.close();
+      }
+
+      // A step may call a tool this surface defined; the trace names the tool
+      // that actually ran, so an alias never hides what happened.
+      const aliased = await openSession();
+      try {
+        await aliased.request(
+          toolCall(1, "surface", {
+            pick: [
+              { tool: "read_agent", as: "read_pinned", args: { name: "exploit-developer" } },
+              { tool: "list_agents", as: "flow", then: [{ tool: "read_pinned" }] },
+            ],
+          }),
+        );
+        const text = textOf(await aliased.request(toolCall(2, "flow", {})));
+        assert(text.includes("[chain] list_agents → read_pinned"), "the chain header is wrong");
+        assert(
+          /\[2\] read_agent\(name=exploit-developer\)/.test(text),
+          "the trace did not name the tool that actually ran",
+        );
+      } finally {
+        aliased.close();
+      }
+
+      // The listing declares the chain before it is called, so a model is not
+      // surprised by a search tool that returns a document.
+      const declared = await openSession();
+      try {
+        await declared.request(
+          toolCall(1, "surface", {
+            pick: [
+              {
+                tool: "list_agents",
+                as: "two_agents",
+                then: [{ tool: "read_agent", extract: { name: AGENT_NAME }, take: 2 }],
+              },
+            ],
+          }),
+        );
+        const tool = ((await declared.request(listTools(2)))?.result?.tools ?? []).find(
+          (entry) => entry.name === "two_agents",
+        );
+        assert(
+          /Runs a chain/.test(tool?.description ?? ""),
+          `the listing does not declare the chain: ${(tool?.description ?? "").slice(0, 120)}`,
+        );
+      } finally {
+        declared.close();
+      }
+
+      // Everything a bad chain can get wrong is refused with a reason, in one
+      // call, rather than failing after the chain has already run partway.
+      const bad = await callServer([
+        toolCall(1, "surface", {
+          pick: [
+            {
+              tool: "list_agents",
+              as: "inner",
+              then: [{ tool: "read_agent", extract: { name: AGENT_NAME } }],
+            },
+            { tool: "list_agents", as: "outer", then: [{ tool: "inner" }] },
+          ],
+        }),
+        toolCall(2, "surface", {
+          pick: [
+            {
+              tool: "list_agents",
+              as: "many",
+              then: [
+                { tool: "no_such_tool" },
+                { tool: "read_agent", extract: { nmae: "x" } },
+                { tool: "read_agent", extract: { name: "[bad" } },
+              ],
+            },
+          ],
+        }),
+      ]);
+
+      for (const [index, what] of [
+        [1, "a chain nested inside a chain"],
+        [2, "a chain with three separate faults"],
+      ]) {
+        const response = bad.get(index);
+        assert(
+          Boolean(response?.error) || Boolean(response?.result?.isError),
+          `${what} was accepted`,
+        );
+      }
+      assert(
+        /chains cannot nest/.test(textOf(bad.get(1))),
+        "nesting was refused without saying why",
+      );
+
+      const many = textOf(bad.get(2));
+      for (const named of ["no_such_tool", "nmae", "[bad"]) {
+        assert(
+          many.includes(named),
+          `the refusal did not report \`${named}\`: ${many.slice(0, 200)}`,
+        );
+      }
+
+      // And the chain is part of what was built, so it survives the process.
+      const builder = await openSession();
+      try {
+        await builder.request(
+          toolCall(1, "surface", {
+            pick: [
+              {
+                tool: "list_agents",
+                as: "two_agents",
+                then: [{ tool: "read_agent", extract: { name: AGENT_NAME }, take: 2 }],
+              },
+            ],
+          }),
+        );
+        const saved = await builder.request(
+          toolCall(2, "surface", {
+            save: id,
+            guidance:
+              "A gate probe carrying a chain, to prove the sequence survives a process boundary.",
+          }),
+        );
+        assert(!saved?.result?.isError, `saving the chain failed: ${textOf(saved)}`);
+      } finally {
+        builder.close();
+      }
+
+      const reopened = await openSession();
+      try {
+        await reopened.request(toolCall(1, "surface", { set: id }));
+        const text = textOf(await reopened.request(toolCall(2, "two_agents", {})));
+        assert(
+          text.includes("[chain] list_agents → read_agent"),
+          "a recalled chain lost its sequence",
+        );
+        assert(
+          (text.match(/--- name=[a-z0-9-]+ ---/g) ?? []).length === 2,
+          "a recalled chain lost its fan-out",
+        );
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      cleanupProfile(id);
+    }
+
+    assert(!existsSync(path), "cleanup failed to remove the probe surface");
+    pass("chain");
+  },
+
   ledger: checkLedger,
 };
 
