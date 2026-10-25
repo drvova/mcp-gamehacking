@@ -9,12 +9,12 @@ import { createInterface } from "readline";
 import { SURFACE_TOOLS } from "./profiles/builtin.js";
 import { loadProfiles, saveProfile } from "./profiles/registry.js";
 import {
-  getSessionProfile,
+  getSessionSurface,
   resolveProfile,
-  setSessionProfile,
+  setSessionSurface,
   shapeTools,
 } from "./profiles/resolve.js";
-import { PROFILE_ID_MESSAGE, PROFILE_ID_PATTERN } from "./profiles/types.js";
+import { ModelProfileSchema, PROFILE_ID_MESSAGE, PROFILE_ID_PATTERN } from "./profiles/types.js";
 import type { ModelProfile } from "./profiles/types.js";
 
 const ROOT = resolve(import.meta.dirname, "..");
@@ -396,9 +396,8 @@ const server = new McpServer(
   {
     instructions:
       "Knowledge base for game hacking and reverse engineering: 4,160 skills, 75 agents, 161 subagents, 114 plugins and 148 prompts, including full source archives for roughly 3,980 projects.\n\n" +
-      "The tool surface is not fixed. A profile decides which tools you carry, in what order, and how each one is described to you, because models do not work equally well on the same set. The surface you start with is a seed: enough to orient, see every option, and then choose.\n\n" +
-      "One tool manages this: call `surface` with no arguments to see which surface governs this session and why, with `list` to enumerate the surfaces or the whole catalogue, and with `set` to take one. Or call `define_model_profile` to build your own — pick your tools, order them, and write the descriptions in the terms you work best in. Authored profiles persist for later sessions.\n\n" +
-      "Nothing is withheld by a profile: a tool it does not carry stays callable by name, so a narrow surface is a presentation choice, never a lost capability.",
+      "The tool surface is not fixed, and it is not chosen for you. Models do not work equally well on the same tools, so no base set suits everyone; you start with one tool and no working set. Call `surface` with no arguments to see the whole catalogue, then compose your own surface with `pick` — or take a ready-made one with `set`, or write a durable one with `define_model_profile`.\n\n" +
+      "Nothing is withheld in the meantime: a tool your surface does not carry stays callable by name, so a narrow surface is a presentation choice, never a lost capability.",
   },
 );
 
@@ -1869,7 +1868,7 @@ function installProfileAwareToolList(mcp: McpServer): boolean {
     // pipelined request cannot change what this one resolves to.
     const meta = extra?._meta;
     const clientName = mcp.server.getClientVersion()?.name ?? null;
-    const session = getSessionProfile();
+    const session = getSessionSurface();
 
     const base = await original(request, extra);
     const resolved = await resolveProfile(PROFILE_ROOT, { meta, clientName, session });
@@ -1880,22 +1879,69 @@ function installProfileAwareToolList(mcp: McpServer): boolean {
   return true;
 }
 
+/**
+ * Compose an ad-hoc surface from chosen tool names.
+ *
+ * Session-scoped and never written to disk: `pick` is the fast path for "these
+ * tools, now", while `define_model_profile` is the durable one. Unknown names
+ * are reported rather than silently dropped, so a typo does not quietly produce
+ * a smaller surface than the caller asked for.
+ */
+async function pickSurface(
+  names: string[],
+): Promise<{ failure: string } | { profile: ModelProfile; unknown: string[] }> {
+  const all = await listRegisteredTools();
+  if (all.length === 0) return { failure: "The tool catalogue is unavailable in this build." };
+
+  const available = new Set(all.map((tool) => tool.name));
+  const wanted = names.map((name) => name.trim()).filter((name) => name.length > 0);
+  if (wanted.length === 0) {
+    return { failure: "`pick` needs at least one tool name. Call `surface` to see the catalogue." };
+  }
+
+  const unknown = wanted.filter((name) => !available.has(name));
+  const known = wanted.filter((name) => available.has(name));
+  if (known.length === 0) {
+    return {
+      failure:
+        `None of those tools exist: ${unknown.join(", ")}. ` +
+        "Call `surface` with no arguments to see the catalogue.",
+    };
+  }
+
+  const profile = ModelProfileSchema.parse({
+    id: "picked",
+    label: "Picked",
+    description: `Composed for this session: ${known.length} tools.`,
+    guidance:
+      `You composed this surface yourself, from the catalogue, and it holds ${known.length} tools: ` +
+      `${known.join(", ")}. It is session-scoped and nothing was written to disk.\n\n` +
+      "Recompose it with `surface` and `pick` whenever the task changes shape — a surface is a working " +
+      "set, not a commitment. If it turns out to be right, `define_model_profile` writes it down so " +
+      "later sessions start there.",
+    tools: { include: known, order: known, exclude: [], descriptions: {} },
+    workflow: [],
+  });
+
+  return { profile, unknown };
+}
+
 /** Apply a session surface override. Returns an error message, or null on success. */
 async function applySurface(id: string): Promise<string | null> {
   if (id === "auto") {
-    setSessionProfile(null);
+    setSessionSurface(null);
     return null;
   }
 
   // Apply the override before the first await so a pipelined tools/list cannot
   // resolve ahead of it, then roll back if the id turns out to be unknown.
-  const previous = getSessionProfile();
-  setSessionProfile(id);
+  const previous = getSessionSurface();
+  setSessionSurface({ kind: "id", id });
 
   const { profiles } = await loadProfiles(PROFILE_ROOT);
   if (!profiles.has(id)) {
     // Only roll back if nothing newer has taken over in the meantime.
-    if (getSessionProfile() === id) setSessionProfile(previous);
+    if (getSessionSurface()?.kind === "id") setSessionSurface(previous);
     return `Unknown surface "${id}". Available: ${[...profiles.keys()].sort().join(", ")}.`;
   }
   return null;
@@ -1928,7 +1974,7 @@ async function renderSurfaces(activeId: string): Promise<string> {
 
   return (
     `# Surfaces (${profiles.size})\n\n${rows.join("\n")}${problems}\n\n${wiring}\n\n` +
-    "Take one with `surface` and `set`, or build your own with `define_model_profile`."
+    "Compose your own with `surface` and `pick`, take one of these with `set`, or write a durable one with `define_model_profile`."
   );
 }
 
@@ -1956,7 +2002,7 @@ async function renderCatalogue(profile: ModelProfile): Promise<string> {
     `# Tool catalogue (${all.length} registered)\n\n` +
     `\`${profile.id}\` carries ${inside.length} of them.\n\n` +
     `## Carried by \`${profile.id}\` (${inside.length})\n${render(inside)}${rest}\n\n` +
-    "Change what you carry with `surface` and `set`, or build a surface with `define_model_profile`."
+    "Compose your own set from these with `surface` and `pick`, take one of the ready-made surfaces with `set`, or write a durable one with `define_model_profile`."
   );
 }
 
@@ -1975,47 +2021,76 @@ async function renderSurface(
     ? `\n\n## Recommended workflow\n${profile.workflow.map((step, i) => `${i + 1}. ${step}`).join("\n")}`
     : "";
 
-  const carried = shapeTools(await listRegisteredTools(), profile).map((tool) => tool.name);
+  const all = await listRegisteredTools();
+  const carried = shapeTools(all, profile).map((tool) => tool.name);
+  const carriedSet = new Set(carried);
+  const rest = all.map((tool) => tool.name).filter((name) => !carriedSet.has(name));
+
   const carries = carried.length
-    ? `\n\n## What this surface carries (${carried.length})\n${carried.map((name) => `\`${name}\``).join(", ")}`
+    ? `\n\n## Carried (${carried.length})\n${carried.map((name) => `\`${name}\``).join(", ")}`
+    : "";
+
+  // Show the delta between this surface and the catalogue. It is empty when the
+  // surface already holds everything, and it is exactly the decision input when
+  // it does not — which is the case that matters, since choosing is the point.
+  const missing = rest.length
+    ? `\n\n## Not carried (${rest.length})\n` +
+      `${rest.map((name) => `\`${name}\``).join(", ")}\n\n` +
+      "All of these work if you call them by name. To carry them, `pick` the set you want — " +
+      '`surface` with `list: "tools"` gives each one\'s description.'
     : "";
 
   return (
     `# Surface: ${profile.label} (\`${profile.id}\`)\n\n` +
     `${profile.description}\n\n` +
     `Selected because ${why}. Client reported: \`${clientName ?? "unknown"}\`.\n\n` +
-    `## Guidance\n${profile.guidance}${steps}${carries}\n\n` +
+    `## Guidance\n${profile.guidance}${steps}${carries}${missing}\n\n` +
     "A surface shapes which tools are listed, never which are callable: any tool works by name. " +
-    "Use `surface` with `list` to see every surface or the whole catalogue, and with `set` to switch."
+    "Use `surface` with `list` to enumerate, `pick` to compose your own set, or `set` to switch."
   );
 }
 
 server.tool(
   "surface",
-  "Your tool surface: report it, enumerate what exists, or switch. Call with no arguments to see which surface governs this session, why it was selected, and the guidance written for it.",
+  "Your tool surface. With no arguments it reports which surface governs this session, why, what it carries, and what it does not. `pick` composes your own surface from the catalogue, `set` takes a ready-made one, `list` enumerates.",
   {
     list: z
       .enum(["surfaces", "tools"])
       .optional()
-      .describe("Enumerate the available surfaces, or every registered tool"),
+      .describe("Enumerate the available surfaces, or every registered tool with its description"),
+    pick: z
+      .array(z.string())
+      .optional()
+      .describe(
+        "Compose your own surface from these tool names, for this session. This is the intended path: the server does not choose a working set for you.",
+      ),
     set: z
       .string()
       .optional()
       .describe(
-        "Switch to this surface id, or 'auto' to clear the override and fall back to detection",
+        "Take this ready-made surface id, or 'auto' to clear the override and fall back to detection",
       ),
   },
-  async ({ list, set }, extra) => {
+  async ({ list, pick, set }, extra) => {
     const meta = extra?._meta;
     const clientName = server.server.getClientVersion()?.name ?? null;
 
-    // Apply a switch before resolving, so the report reflects the new surface.
-    if (set !== undefined) {
+    // Apply any change before resolving, so the report describes the surface the
+    // caller now has rather than the one they just left.
+    let composed: string | null = null;
+    if (pick !== undefined) {
+      const outcome = await pickSurface(pick);
+      if ("failure" in outcome) return err(outcome.failure);
+      setSessionSurface({ kind: "picked", profile: outcome.profile });
+      if (outcome.unknown.length) {
+        composed = `Ignored unknown tool names: ${outcome.unknown.join(", ")}.`;
+      }
+    } else if (set !== undefined) {
       const failure = await applySurface(set);
       if (failure !== null) return err(failure);
     }
 
-    const session = getSessionProfile();
+    const session = getSessionSurface();
     const { profile, source, matched } = await resolveProfile(PROFILE_ROOT, {
       meta,
       clientName,
@@ -2025,7 +2100,8 @@ server.tool(
     if (list === "surfaces") return ok(await renderSurfaces(profile.id));
     if (list === "tools") return ok(await renderCatalogue(profile));
 
-    return ok(await renderSurface(profile, source, matched, clientName));
+    const report = await renderSurface(profile, source, matched, clientName);
+    return ok(composed ? `${composed}\n\n${report}` : report);
   },
 );
 

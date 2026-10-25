@@ -21,7 +21,7 @@ import {
  * particular fits every model badly. The complete set is discoverable via
  * `surface` and selectable with the `full` profile.
  */
-const SEED_SURFACE = ["surface", "define_model_profile", "search_skills", "read_skill"];
+const SEED_SURFACE = ["surface"];
 
 /** Every tool the server registers, in registration order. */
 const FULL_CATALOG = [
@@ -56,8 +56,6 @@ const FULL_CATALOG = [
   "define_model_profile",
 ];
 
-const PROFILE_TOOLS = ["surface", "define_model_profile"];
-
 const PROBE_ID = "test-probe-profile";
 
 function cleanupProbe() {
@@ -81,7 +79,6 @@ describe("model profile surface", () => {
     );
 
     expect(names).toEqual(SEED_SURFACE);
-    for (const tool of PROFILE_TOOLS) expect(names).toContain(tool);
     expect(names.length).toBeLessThan(FULL_CATALOG.length);
   });
 
@@ -345,6 +342,83 @@ describe("surface escape guarantee", () => {
       const wide = toolNames(await session.request(listTools(4)));
 
       expect(wide.length).toBeGreaterThan(narrow.length);
+    } finally {
+      session.close();
+    }
+  });
+});
+
+describe("composing your own surface", () => {
+  it("starts with one tool and no working set", async () => {
+    const names = toolNames((await callServer([listTools(1)], { clientName: "unknown" })).get(1));
+
+    // Not a base set: there is no set that suits every model, so the floor is
+    // the one tool that lets a caller see everything and choose.
+    expect(names).toEqual(["surface"]);
+  });
+
+  it("shows the whole catalogue from the seed, so there is something to choose from", async () => {
+    const report = textOf((await callServer([toolCall(1, "surface")])).get(1));
+
+    expect(report).toMatch(/## Not carried \(\d+\)/);
+    for (const name of FULL_CATALOG) expect(report).toContain(`\`${name}\``);
+  });
+
+  it("composes a surface from chosen names, in the caller's order", async () => {
+    const session = await openSession();
+    try {
+      const picked = await session.request(
+        toolCall(1, "surface", { pick: ["find_offset", "search_skills", "read_skill"] }),
+      );
+      expect(wasRefused(picked)).toBe(false);
+
+      expect(toolNames(await session.request(listTools(2)))).toEqual([
+        "find_offset",
+        "search_skills",
+        "read_skill",
+        "surface",
+      ]);
+    } finally {
+      session.close();
+    }
+  });
+
+  it("reports an unknown name rather than silently shrinking the surface", async () => {
+    const session = await openSession();
+    try {
+      const typo = await session.request(
+        toolCall(1, "surface", { pick: ["search_skills", "no_such_tool"] }),
+      );
+      expect(textOf(typo)).toContain("no_such_tool");
+      expect(toolNames(await session.request(listTools(2)))).toEqual(["search_skills", "surface"]);
+    } finally {
+      session.close();
+    }
+  });
+
+  it("refuses a pick that names nothing real, instead of presenting an empty surface", async () => {
+    const session = await openSession();
+    try {
+      const refused = await session.request(toolCall(1, "surface", { pick: ["nope"] }));
+      expect(wasRefused(refused)).toBe(true);
+      // The refusal must leave the previous surface intact.
+      expect(toolNames(await session.request(listTools(2)))).toEqual(["surface"]);
+    } finally {
+      session.close();
+    }
+  });
+
+  it("lets a composed surface be replaced by a ready-made one and cleared", async () => {
+    const session = await openSession();
+    try {
+      await session.request(toolCall(1, "surface", { pick: ["search_skills"] }));
+      expect(toolNames(await session.request(listTools(2)))).toEqual(["search_skills", "surface"]);
+
+      await session.request(toolCall(3, "surface", { set: "full" }));
+      expect(toolNames(await session.request(listTools(4)))).toEqual(FULL_CATALOG);
+
+      await session.request(toolCall(5, "surface", { set: "auto" }));
+      expect(toolNames(await session.request(listTools(6)))).toEqual(["surface"]);
     } finally {
       session.close();
     }

@@ -159,26 +159,35 @@ That last point is why this is not a filter over a shared catalogue. Two models
 can both carry `read_source` and still need to be told about it in different
 terms.
 
-### There is no generic base
+### There is no generic base — the seed is one tool
 
-An unrecognised caller gets a **seed**, not everything. A surface that fits no
-model in particular fits every model badly, so the seed carries seven tools:
-enough to orient, see every option, and then choose.
+An unrecognised caller gets **one tool and no working set**. That is the whole
+argument: if models do not perform equally on the same tools, then any base set
+is an assumption about the caller, and a set that fits no model in particular
+fits every model badly. So the server does not choose one.
 
 ```
-surface                report where you are, list what exists, switch
-define_model_profile   build your own
-search_skills          \
-read_skill             / enough to do real work while deciding
+surface    the catalogue, and the means to compose your own surface from it
 ```
 
-A caller that wants the whole catalogue asks for it: the `full` profile carries
-all 29 tools with the server's own wording.
+Calling it with no arguments reports where you are and lists **everything that
+exists**, so there is something to choose from. Then:
 
-**Nothing is withheld by a profile.** A tool a profile does not carry remains
-callable by name. Omission is presentation, never permission, so a narrow or
-wrong profile cannot cost a capability — and `surface` with `list` always shows
-what exists.
+```
+surface { pick: ["search_skills", "read_skill"] }   compose your own, this session
+surface { set: "claude" }                           take a ready-made surface
+surface { list: "tools" }                           every tool, with its description
+```
+
+`pick` is the intended path. It is session-scoped and writes nothing to disk —
+a surface is a working set, not a commitment, so recomposing when the task
+changes shape costs one call. `define_model_profile` is the durable version: a
+named surface that persists and can auto-select itself in later sessions.
+
+**Nothing is withheld in the meantime.** Every registered tool stays callable by
+name even when your surface does not present it, so a narrow surface is a
+presentation choice and never a lost capability — and `surface` always shows the
+delta between what you carry and what exists.
 
 ### Resolution order
 
@@ -196,38 +205,25 @@ everything-surface.
 
 ### Built-in profiles
 
-| Profile   | Surface                                          |
-| --------- | ------------------------------------------------ |
-| `default` | the 4-tool seed                                  |
-| `full`    | all 29, registration order, server wording       |
-| `claude`  | curated-first, with cross-check guidance         |
-| `gpt`     | short deterministic sequences, compact results   |
-| `gemini`  | aggregation-first, per-claim attribution         |
-| `compact` | 5 working tools, search weighted over reading    |
-| `local`   | 4 working tools, single-argument, no composition |
+| Profile   | Surface                                                      |
+| --------- | ------------------------------------------------------------ |
+| `default` | the 1-tool seed                                              |
+| `full`    | all 29, registration order, server wording                   |
+| `claude`  | curated-first, with cross-check guidance                     |
+| `gpt`     | short deterministic sequences, compact results               |
+| `gemini`  | aggregation-first, per-claim attribution                     |
+| `compact` | 5 working tools, search weighted over reading                |
+| `local`   | 4 working tools + `surface`, single-argument, no composition |
 
 ### The surface core
 
-One tool is carried by **every** surface, whatever else a profile drops:
+`surface` is carried by **every** surface, whatever else a profile drops.
 
-```
-surface   report where you are, enumerate what exists, switch to another
-```
-
-It replaces the four separate administration tools this layer started with: four
-tool slots reduced to one, and management's share of the seed surface down from
-32% to 19%. A model should not spend more of its context describing its tools
-than using them.
-
-`define_model_profile` is the other half of the seed and is deliberately large:
-authoring a surface means choosing tools, ordering them, and writing each one's
-wording, so eleven optional parameters are inherent to it. It is not
-administration — it is the forge.
-
-A profile may choose to be narrow; it may not choose to be _inescapable_. Without
-it, a model auto-detected into `local` could neither see that a profile
-governed it nor leave — a capability loss caused by withheld knowledge, landing
-hardest on exactly the small models least able to guess a tool name.
+A profile may choose to be narrow; it may not choose to be _inescapable_.
+Without this one tool a model auto-detected into `local` could neither see that
+a surface governed it nor leave — a capability loss caused by withheld
+knowledge, landing hardest on exactly the small models least able to guess a
+tool name.
 
 The core is enforced in the shaper, which every profile passes through, so it
 holds for built-ins, authored profiles, and files edited by hand on disk. An

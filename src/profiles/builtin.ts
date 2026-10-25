@@ -12,11 +12,15 @@ import { ModelProfileSchema, type ModelProfile } from "./types.js";
  */
 
 /**
- * The seed surface: the smallest thing that lets a caller orient, discover what
- * exists, and then choose or author. Five of the seven tools here used to be
- * administration; the whole meta layer is now one tool.
+ * The seed surface: one tool.
+ *
+ * Not a base set of work tools, because there is no set that suits every model
+ * — a base that fits no model in particular fits every model badly. The seed is
+ * the single tool that lets a caller see everything that exists and compose its
+ * own surface from it. Choosing is the first act, and after that the surface is
+ * the caller's own.
  */
-const BOOTSTRAP_TOOLS = ["surface", "define_model_profile", "search_skills", "read_skill"];
+const BOOTSTRAP_TOOLS = ["surface"];
 
 /**
  * The tool every surface must carry, whatever else it drops.
@@ -44,30 +48,27 @@ const DEFINITIONS = [
     id: "default",
     label: "Seed",
     description:
-      "Bootstrap surface for an unrecognised caller: enough to orient, see every option, and take or author a fitted surface.",
+      "One tool: the catalogue and the means to compose your own surface from it. Nothing is chosen for you.",
     match: { clientNames: [], models: [] },
     tools: {
       include: BOOTSTRAP_TOOLS,
       order: BOOTSTRAP_TOOLS,
       descriptions: {
         surface:
-          "Start here. With no arguments it reports which surface governs this session, why, and the guidance written for it. `list` enumerates the surfaces or the whole catalogue; `set` switches you to another.",
-        define_model_profile:
-          "Build your own surface: choose which tools you carry, the order, and how each is described to you. Saved and reloaded in later sessions.",
-        search_skills:
-          "Scored search across the library. A specific query beats several broad ones.",
-        read_skill: "Read one curated write-up. Prefer this over raw source.",
+          "Start here, and the only tool you begin with. No arguments reports where you are and lists everything that exists. `pick` composes your own surface from those tools — that is the point: not every model works well on the same set, so this server does not choose one for you. `set` takes a ready-made surface; `list` enumerates.",
       },
     },
     guidance:
-      "You are running on the seed surface, which is deliberately small: it carries only what you need to orient and then choose. It is not the full library and is not meant to be.\n\n" +
-      "One tool manages this: call `surface` with `list` to see every registered tool or the surfaces already built, and with `set` to take one. If none does, call `define_model_profile` and build the surface you actually want — pick your tools, order them, and write the descriptions in the terms you work best in. That profile persists for later sessions.\n\n" +
-      "Nothing is withheld while you are on the seed: every tool remains callable by name, so you can finish a task now and shape your surface afterwards.",
+      "You begin with one tool and no working set, deliberately. Models do not perform equally on the same tools, so a base set chosen for you would fit you badly. This server gives you the catalogue and the means to compose; the choosing is yours.\n\n" +
+      "Call `surface` with no arguments: it reports the whole catalogue, so you can see every tool that exists with the wording written for you. Then take what you actually want:\n\n" +
+      "- `surface` with `pick: [...]` composes a surface from the names you choose, for this session. This is the intended path.\n" +
+      '- `surface` with `set: "<id>"` takes one of the ready-made surfaces instead, if one fits.\n' +
+      "- `define_model_profile` writes a named surface that persists and can auto-select itself in later sessions. It is not in your seed, but it is registered and callable by name.\n\n" +
+      "Nothing is withheld in the meantime. Every registered tool is callable by name even when your surface does not present it, so you can finish a task first and compose your surface afterwards.",
     workflow: [
-      "surface to see which surface you have.",
-      "surface with list to see what else exists.",
-      "surface with set if one fits, otherwise define_model_profile.",
-      "search_skills then read_skill to do the work.",
+      "surface with no arguments to see where you are and what exists.",
+      "surface with pick to compose your own working set.",
+      "Work with what you chose; adjust with pick as the task changes.",
     ],
   },
   {
@@ -242,7 +243,7 @@ const DEFINITIONS = [
     guidance:
       "Your budget is small, so treat every read as expensive. Five working tools are carried here for that reason, plus the four that describe and change your own surface.\n\n" +
       "Never call `read_source` without a specific question: a single archive can exceed 100,000 lines. Work in one direction — narrow with `search_skills`, read the write-up with `read_skill`, and stop once you can answer.\n\n" +
-      "If the five working tools are not enough, call `surface` with `list` to see everything that exists and with `set` to take a wider one. Working around the gap costs more than switching does.",
+      "If the five working tools are not enough, `surface` with `list` shows everything that exists; recompose with `pick`, or take a ready-made one with `set`. Working around the gap costs more than recomposing does.",
     workflow: [
       "search_skills once, with the most specific query you can form.",
       "read_skill on the single best hit.",
@@ -272,7 +273,7 @@ const DEFINITIONS = [
     guidance:
       "Four working tools are carried, all with simple arguments, plus the four that describe and change your own surface. Use them one at a time and do not chain steps speculatively.\n\n" +
       "`search_skills` takes a plain query string; if the first query returns nothing useful, try a single distinctive word rather than a sentence. `read_skill` takes one exact skill name copied from a search result. `get_file_tree` needs a project name and `max_entries` of at least 10.\n\n" +
-      "The offset, grep and source tools are deliberately absent: they need careful arguments and produce large output. If you need one, `surface` with `list` shows what exists and with `set` moves you to a surface that carries it.",
+      "The offset, grep and source tools are deliberately absent: they need careful arguments and produce large output. If you need one, `surface` with `list` shows what exists, and `pick` puts it on your surface.",
     workflow: [
       "skill_stats to confirm the library is reachable.",
       "search_skills with one distinctive word.",

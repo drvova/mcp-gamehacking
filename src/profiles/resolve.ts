@@ -2,15 +2,23 @@ import { DEFAULT_PROFILE_ID, SURFACE_TOOLS } from "./builtin.js";
 import { findProfile, loadProfiles } from "./registry.js";
 import type { ModelProfile, ResolvedProfile } from "./types.js";
 
-/** Session-scoped override set by `set_model_profile`. */
-let sessionProfileId: string | null = null;
+/**
+ * The session-scoped surface override.
+ *
+ * Either a named surface the caller selected, or an ad-hoc one they composed
+ * with `surface { pick: [...] }`. Both occupy the same slot: choosing one
+ * replaces the other, and `set: "auto"` clears whichever is present.
+ */
+export type SessionSurface = { kind: "id"; id: string } | { kind: "picked"; profile: ModelProfile };
 
-export function setSessionProfile(id: string | null): void {
-  sessionProfileId = id;
+let sessionSurface: SessionSurface | null = null;
+
+export function setSessionSurface(next: SessionSurface | null): void {
+  sessionSurface = next;
 }
 
-export function getSessionProfile(): string | null {
-  return sessionProfileId;
+export function getSessionSurface(): SessionSurface | null {
+  return sessionSurface;
 }
 
 /** Read a string field from an untrusted `_meta` object without asserting a shape. */
@@ -47,7 +55,7 @@ export type ResolveInput = {
    * keeps resolution deterministic: without it, a request that awaits before
    * resolving could observe a mutation made by a later, pipelined request.
    */
-  session?: string | null;
+  session?: SessionSurface | null;
 };
 
 /**
@@ -77,10 +85,13 @@ export async function resolveProfile(
     if (profile) return { profile, source: "meta-model", matched: metaModel };
   }
 
-  const sessionId = input.session !== undefined ? input.session : sessionProfileId;
-  if (sessionId) {
-    const profile = await findProfile(root, sessionId);
-    if (profile) return { profile, source: "session", matched: sessionId };
+  const session = input.session !== undefined ? input.session : sessionSurface;
+  if (session) {
+    if (session.kind === "picked") {
+      return { profile: session.profile, source: "session", matched: session.profile.id };
+    }
+    const profile = await findProfile(root, session.id);
+    if (profile) return { profile, source: "session", matched: session.id };
   }
 
   const env = input.env ?? process.env;
