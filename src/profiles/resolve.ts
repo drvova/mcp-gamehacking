@@ -81,6 +81,7 @@ export async function resolveProfile(
         source: "meta-profile",
         matched: metaProfileId,
         core: manifest.surfaceCore,
+        mutatingArgs: manifest.mutatingArgs,
       };
   }
 
@@ -88,7 +89,13 @@ export async function resolveProfile(
   if (metaModel) {
     const profile = matchByField(all, "models", metaModel);
     if (profile)
-      return { profile, source: "meta-model", matched: metaModel, core: manifest.surfaceCore };
+      return {
+        profile,
+        source: "meta-model",
+        matched: metaModel,
+        core: manifest.surfaceCore,
+        mutatingArgs: manifest.mutatingArgs,
+      };
   }
 
   const session = input.session !== undefined ? input.session : sessionSurface;
@@ -99,11 +106,18 @@ export async function resolveProfile(
         source: "session",
         matched: session.profile.id,
         core: manifest.surfaceCore,
+        mutatingArgs: manifest.mutatingArgs,
       };
     }
     const profile = await findProfile(root, session.id);
     if (profile)
-      return { profile, source: "session", matched: session.id, core: manifest.surfaceCore };
+      return {
+        profile,
+        source: "session",
+        matched: session.id,
+        core: manifest.surfaceCore,
+        mutatingArgs: manifest.mutatingArgs,
+      };
   }
 
   const env = input.env ?? process.env;
@@ -111,10 +125,22 @@ export async function resolveProfile(
   if (envSignal) {
     const direct = await findProfile(root, envSignal);
     if (direct)
-      return { profile: direct, source: "env", matched: envSignal, core: manifest.surfaceCore };
+      return {
+        profile: direct,
+        source: "env",
+        matched: envSignal,
+        core: manifest.surfaceCore,
+        mutatingArgs: manifest.mutatingArgs,
+      };
     const byModel = matchByField(all, "models", envSignal);
     if (byModel)
-      return { profile: byModel, source: "env", matched: envSignal, core: manifest.surfaceCore };
+      return {
+        profile: byModel,
+        source: "env",
+        matched: envSignal,
+        core: manifest.surfaceCore,
+        mutatingArgs: manifest.mutatingArgs,
+      };
   }
 
   if (input.clientName) {
@@ -125,6 +151,7 @@ export async function resolveProfile(
         source: "client-name",
         matched: input.clientName,
         core: manifest.surfaceCore,
+        mutatingArgs: manifest.mutatingArgs,
       };
   }
 
@@ -134,7 +161,13 @@ export async function resolveProfile(
       `the manifest names "${manifest.seed}" as the seed surface, but no such surface is defined`,
     );
   }
-  return { profile: fallback, source: "seed", matched: null, core: manifest.surfaceCore };
+  return {
+    profile: fallback,
+    source: "seed",
+    matched: null,
+    core: manifest.surfaceCore,
+    mutatingArgs: manifest.mutatingArgs,
+  };
 }
 
 /** The minimum a tool needs to expose for shaping. */
@@ -161,6 +194,7 @@ export type ShapeableTool = {
 export function effectiveDerived<T extends ShapeableTool>(
   profile: ModelProfile,
   tools: T[],
+  mutatingArgs: Record<string, string[]> = {},
 ): ModelProfile["tools"]["derived"] {
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
   const defined = new Set<string>();
@@ -233,6 +267,14 @@ export function effectiveDerived<T extends ShapeableTool>(
       // work behind a single name.
       if (alias !== undefined && alias.then.length > 0) continue;
 
+      // A step may not fill an argument that changes session state. The chain
+      // would reconfigure the caller's tooling as a side effect of a tool call,
+      // and would change what the remaining steps resolve against — a fixed
+      // sequence has to stay deterministic to be readable.
+      const mutating = mutatingArgs[step.tool] ?? mutatingArgs[target.name] ?? [];
+      const filled = [...Object.keys(step.extract), ...Object.keys(alias?.args ?? {})];
+      if (filled.some((name) => mutating.includes(name))) continue;
+
       const targetProperties = target.inputSchema?.properties;
       const names = Object.keys(step.extract);
       if (
@@ -281,8 +323,11 @@ export function boundArgsFor<T extends ShapeableTool>(
   profile: ModelProfile,
   name: string,
   tools: T[],
+  mutatingArgs: Record<string, string[]> = {},
 ): ModelProfile["tools"]["derived"][number] | null {
-  const entry = effectiveDerived(profile, tools).find((candidate) => candidate.as === name);
+  const entry = effectiveDerived(profile, tools, mutatingArgs).find(
+    (candidate) => candidate.as === name,
+  );
   return entry ?? null;
 }
 
@@ -646,6 +691,7 @@ export function shapeTools<T extends ShapeableTool>(
   tools: T[],
   profile: ModelProfile,
   surfaceCore: readonly string[],
+  mutatingArgs: Record<string, string[]> = {},
 ): T[] {
   const { include, exclude, order, descriptions, derived } = profile.tools;
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
@@ -683,7 +729,7 @@ export function shapeTools<T extends ShapeableTool>(
   // does not otherwise carry, and an alias equal to its own base name replaces
   // that base rather than appearing twice. Which entries survive is decided by
   // `effectiveDerived`, so the listing and the call path agree by construction.
-  for (const entry of effectiveDerived(profile, tools)) {
+  for (const entry of effectiveDerived(profile, tools, mutatingArgs)) {
     if (excluded.has(entry.as)) continue;
     if (include && include.length > 0 && !include.includes(entry.as) && !core.has(entry.as)) {
       continue;

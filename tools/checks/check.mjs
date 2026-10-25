@@ -1880,6 +1880,121 @@ const CHECKS = {
     pass("catalog-args");
   },
 
+  async "chain-integrity"() {
+    // Found by auditing the chain runner rather than trusting that it worked.
+    // Both defects were the shape this project keeps finding: the surface said
+    // one thing and the code did another.
+    const AGENT_NAME = "- \\*\\*([^*]+)\\*\\*";
+
+    // (1) Extraction must read the RAW answer at every position. It once read raw
+    // for step 2 and shaped for step 3, so the same chain behaved differently by
+    // position. This chain is decisive: `head: 3` cuts every bullet from the
+    // display, so a shaped read could not find a name at all.
+    const session = await openSession();
+    try {
+      await session.request(
+        toolCall(1, "surface", {
+          pick: [
+            {
+              tool: "list_agents",
+              as: "decisive",
+              then: [
+                { tool: "list_agents" },
+                { tool: "read_agent", extract: { name: AGENT_NAME } },
+              ],
+              output: { head: 3 },
+            },
+          ],
+        }),
+      );
+
+      const text = textOf(await session.request(toolCall(2, "decisive", {})));
+      assert(
+        /\[3\] read_agent\(name=[a-z0-9-]+\)/.test(text),
+        `step 3 did not extract from the raw answer: ${text.slice(0, 200)}`,
+      );
+      assert(text.includes("# Agent: "), "step 3's result did not arrive");
+    } finally {
+      session.close();
+    }
+
+    // (2) A step must not fill an argument that changes session state. Before
+    // this rule, calling such a tool REPLACED the caller's whole surface as a
+    // side effect — the model asked to browse agents and its tooling changed.
+    const before = await openSession();
+    const beforeNames = toolNames(await before.request(listTools(1)));
+    before.close();
+    assert(beforeNames.length === 1, `expected a one-tool seed, got ${beforeNames.join(",")}`);
+
+    const bad = await callServer([
+      // Filled by extraction.
+      toolCall(1, "surface", {
+        pick: [
+          {
+            tool: "list_agents",
+            as: "sneaky",
+            then: [{ tool: "surface", extract: { pick: "(Available)" } }],
+          },
+        ],
+      }),
+      // Fixed on a defined alias instead, or the guard is trivially bypassed.
+      toolCall(2, "surface", {
+        pick: [
+          { tool: "surface", as: "writer", args: { pick: ["read_agent"] } },
+          { tool: "list_agents", as: "uses", then: [{ tool: "writer" }] },
+        ],
+      }),
+    ]);
+
+    for (const [id, what] of [
+      [1, "a step filling a mutating argument by extraction"],
+      [2, "a step calling an alias that fixes one"],
+    ]) {
+      const response = bad.get(id);
+      assert(
+        Boolean(response?.error) || Boolean(response?.result?.isError),
+        `${what} was accepted`,
+      );
+    }
+    assert(
+      /changes session state/.test(textOf(bad.get(1))),
+      "the refusal did not say why the argument is forbidden",
+    );
+
+    // The refusal must leave the surface untouched, not half-applied.
+    const after = await openSession();
+    const afterNames = toolNames(await after.request(listTools(1)));
+    after.close();
+    assert(
+      JSON.stringify(afterNames) === JSON.stringify(beforeNames),
+      `a refused chain changed the surface: ${beforeNames.join(",")} -> ${afterNames.join(",")}`,
+    );
+
+    // (3) Only the mutating arguments are forbidden. Refusing the whole tool
+    // would block a legitimate read, and a rule broader than its reason is its
+    // own kind of wrong.
+    const readSession = await openSession();
+    try {
+      const composed = await readSession.request(
+        toolCall(1, "surface", {
+          pick: [
+            { tool: "list_agents", as: "peek", then: [{ tool: "surface" }], output: { head: 2 } },
+          ],
+        }),
+      );
+      assert(
+        !composed?.result?.isError,
+        `reading the surface tool as a step was refused: ${textOf(composed).slice(0, 160)}`,
+      );
+      const text = textOf(await readSession.request(toolCall(2, "peek", {})));
+      assert(text.includes("[chain] list_agents → surface"), "the read chain did not run");
+    } finally {
+      readSession.close();
+    }
+
+    pass("chain-integrity");
+  },
+
   ledger: checkLedger,
 };
 

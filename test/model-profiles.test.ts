@@ -1534,3 +1534,139 @@ describe("the catalogue is a catalogue, not a list of names", () => {
     }
   });
 });
+
+describe("the chain runner's own edges", () => {
+  // Found by auditing the runner rather than trusting that it worked. All three
+  // are the same shape as everything else fixed this session: the surface said
+  // one thing and the code did another.
+  const AGENT_NAME = "- \\*\\*([^*]+)\\*\\*";
+
+  it("reads the RAW answer for extraction, at every position", async () => {
+    // Step 2 is a long answer whose bullets sit past line 3. With `head: 3` the
+    // DISPLAY is cut, but extraction must read the whole thing: shaping is for
+    // the reader, and a rule meant for eyes must not decide what data flows.
+    //
+    // This was position-dependent once — step 2 read raw, step 3 read shaped —
+    // which made the same chain behave differently depending on where a step sat.
+    const session = await openSession();
+    try {
+      await session.request(
+        toolCall(1, "surface", {
+          pick: [
+            {
+              tool: "list_agents",
+              as: "decisive",
+              then: [
+                { tool: "list_agents" },
+                { tool: "read_agent", extract: { name: AGENT_NAME } },
+              ],
+              output: { head: 3 },
+            },
+          ],
+        }),
+      );
+
+      const text = textOf(await session.request(toolCall(2, "decisive", {})));
+
+      // If extraction had read the shaped text, step 3 could not have found a
+      // name: `head: 3` removes every bullet.
+      expect(text).toMatch(/\[3\] read_agent\(name=[a-z0-9-]+\)/);
+      expect(text).toContain("# Agent: ");
+    } finally {
+      session.close();
+    }
+  });
+
+  it("refuses a step that fills an argument which changes session state", async () => {
+    const session = await openSession();
+    try {
+      // A step calling `surface` with `pick` would reconfigure the caller's own
+      // tooling as a side effect of a tool call, and would change what the
+      // remaining steps resolve against.
+      const refused = await session.request(
+        toolCall(1, "surface", {
+          pick: [
+            {
+              tool: "list_agents",
+              as: "sneaky",
+              then: [{ tool: "surface", extract: { pick: "(Available)" } }],
+            },
+          ],
+        }),
+      );
+
+      expect(wasRefused(refused)).toBe(true);
+      expect(textOf(refused)).toMatch(/changes session state/);
+    } finally {
+      session.close();
+    }
+  });
+
+  it("refuses a step calling a defined tool that carries a mutating argument", async () => {
+    const session = await openSession();
+    try {
+      // The same rule has to hold when the argument is fixed on the alias rather
+      // than extracted, or the guard is trivially bypassed.
+      const refused = await session.request(
+        toolCall(1, "surface", {
+          pick: [
+            { tool: "surface", as: "writer", args: { pick: ["read_agent"] } },
+            { tool: "list_agents", as: "uses", then: [{ tool: "writer" }] },
+          ],
+        }),
+      );
+
+      expect(wasRefused(refused)).toBe(true);
+      expect(textOf(refused)).toMatch(/changes session state/);
+    } finally {
+      session.close();
+    }
+  });
+
+  it("still allows READING the surface tool as a step", async () => {
+    const session = await openSession();
+    try {
+      // Only the mutating arguments are forbidden. Refusing the whole tool would
+      // block a legitimate read, and a rule that is broader than its reason is
+      // its own kind of wrong.
+      const composed = await session.request(
+        toolCall(1, "surface", {
+          pick: [
+            { tool: "list_agents", as: "peek", then: [{ tool: "surface" }], output: { head: 2 } },
+          ],
+        }),
+      );
+      expect(wasRefused(composed)).toBe(false);
+
+      const text = textOf(await session.request(toolCall(2, "peek", {})));
+      expect(text).toContain("[chain] list_agents → surface");
+    } finally {
+      session.close();
+    }
+  });
+
+  it("does not let a chain change the surface it is running under", async () => {
+    const session = await openSession();
+    try {
+      const before = toolNames(await session.request(listTools(1)));
+      expect(before).toEqual(["surface"]);
+
+      // The refusal must leave the surface untouched, not half-applied.
+      await session.request(
+        toolCall(2, "surface", {
+          pick: [
+            {
+              tool: "list_agents",
+              as: "sneaky",
+              then: [{ tool: "surface", extract: { pick: "(Available)" } }],
+            },
+          ],
+        }),
+      );
+
+      expect(toolNames(await session.request(listTools(3)))).toEqual(["surface"]);
+    } finally {
+      session.close();
+    }
+  });
+});

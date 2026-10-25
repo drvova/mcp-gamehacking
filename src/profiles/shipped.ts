@@ -23,6 +23,16 @@ const ManifestSchema = z.object({
   surfaceCore: z.array(z.string().min(1)).min(1),
   /** Id given to a surface a caller composes at runtime with `pick`. */
   pickedId: z.string().min(1),
+  /**
+   * Arguments that change session state, keyed by tool.
+   *
+   * A chain step that fills one of these would reconfigure the caller's own
+   * tooling as a side effect of a tool call, and would change what the remaining
+   * steps resolve against — non-determinism in the middle of a fixed sequence.
+   * Declared here so the rule is data, and so a second mutating tool costs a
+   * line rather than a code change.
+   */
+  mutatingArgs: z.record(z.string(), z.array(z.string().min(1))).default({}),
 });
 
 export type Manifest = z.infer<typeof ManifestSchema>;

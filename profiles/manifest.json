@@ -3,5 +3,12 @@
   "surfaceCore": [
     "surface"
   ],
-  "pickedId": "picked"
+  "pickedId": "picked",
+  "mutatingArgs": {
+    "surface": [
+      "pick",
+      "save",
+      "set"
+    ]
+  }
 }

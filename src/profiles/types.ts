@@ -208,4 +208,10 @@ export type ResolvedProfile = {
    * cannot accidentally apply a different one.
    */
   core: readonly string[];
+  /**
+   * Arguments that change session state, from the manifest. Returned for the
+   * same reason as `core`: a caller shaping a surface must apply the same rule
+   * the resolution was made under, not one it looked up separately.
+   */
+  mutatingArgs: Record<string, string[]>;
 };

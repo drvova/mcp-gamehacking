@@ -91,3 +91,7 @@ Scope: A model builds its own tooling. The server ships no base of tools and no 
 - [x] G20: The catalogue publishes each tool's arguments (required vs optional, types, defaults), `detail` explains one tool in full with a worked example, and the published shape is buildable rather than describing a tool that does not exist
   CHECK: node tools/checks/check.mjs catalog-args
   EXPECT: gate-passed:catalog-args
+
+- [x] G21: The chain runner holds its own contract: extraction reads the RAW answer at every step position, a step cannot fill an argument that changes session state (by extraction or on a defined alias), a refusal leaves the surface untouched, and reading the surface tool as a step still works
+  CHECK: node tools/checks/check.mjs chain-integrity
+  EXPECT: gate-passed:chain-integrity

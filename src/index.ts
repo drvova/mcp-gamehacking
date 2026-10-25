@@ -1924,7 +1924,10 @@ function installProfileAwareToolList(mcp: McpServer): boolean {
     const base = await original(request, extra);
     const resolved = await resolveProfile(PROFILE_ROOT, { meta, clientName, session });
 
-    return { ...base, tools: shapeTools(base.tools, resolved.profile, resolved.core) };
+    return {
+      ...base,
+      tools: shapeTools(base.tools, resolved.profile, resolved.core, resolved.mutatingArgs),
+    };
   });
 
   return true;
@@ -1960,12 +1963,22 @@ async function runChain(
   entry: ModelProfile["tools"]["derived"][number],
   profile: ModelProfile,
   registered: ToolListResult["tools"],
+  mutating: Record<string, string[]>,
   first: string,
   call: (name: string, args: Record<string, unknown>) => ToolCallResult | Promise<ToolCallResult>,
 ): Promise<{ failure: string } | { text: string; trace: string[] }> {
   const trace: string[] = [];
-  const pieces: string[] = [];
-  let previous = first;
+  // Two views of the same data, kept apart on purpose:
+  //
+  //   raw     — what extraction reads. Always the unshaped answer, so a rule
+  //             meant for the reader can never decide what flows between steps.
+  //   display — what the caller reads: shaped, and labelled for fan-out.
+  //
+  // These were one variable once, which made extraction read the RAW answer for
+  // step 2 and the SHAPED one for step 3 — the same chain behaving differently
+  // by position, and the opposite of what this file promises.
+  let raw = first;
+  let display = first;
 
   for (const [index, step] of entry.then.entries()) {
     // Steps are numbered from 2: the tool this chain belongs to is step 1.
@@ -1975,12 +1988,12 @@ async function runChain(
     // A step may call a tool this surface defined. Its fixed arguments apply,
     // and its own chain does not: nesting chains would make the sequence
     // something to work out rather than read.
-    const alias = boundArgsFor(profile, step.tool, registered);
+    const alias = boundArgsFor(profile, step.tool, registered, mutating);
     const targetName = alias?.tool ?? step.tool;
 
     const perArgument = new Map<string, string[]>();
     for (const name of names) {
-      const outcome = extractValues(previous, step.extract[name] ?? "");
+      const outcome = extractValues(raw, step.extract[name] ?? "");
       if ("problem" in outcome) {
         return { failure: `Step ${position} (${step.tool}): ${outcome.problem}` };
       }
@@ -1995,7 +2008,7 @@ async function runChain(
       return {
         failure:
           `Step ${position} (${step.tool}) cannot run: nothing matched ${patterns} in the previous ` +
-          `answer, which began:\n\n${previous.slice(0, 400)}`,
+          `answer, which began:\n\n${raw.slice(0, 400)}`,
       };
     }
 
@@ -2006,7 +2019,8 @@ async function runChain(
       );
     }
 
-    const stepResults: string[] = [];
+    const raws: string[] = [];
+    const showns: string[] = [];
     for (let pickIndex = 0; pickIndex < wanted; pickIndex++) {
       const args: Record<string, unknown> = { ...(alias?.args ?? {}) };
       for (const name of names) args[name] = perArgument.get(name)?.[pickIndex];
@@ -2021,20 +2035,23 @@ async function runChain(
         };
       }
 
+      raws.push(text);
+
       // Shape each result BEFORE labelling it. A label is structure, not
       // content: a `sections` rule that stripped it would leave several results
       // with no way to tell which is which, which is the exact class of lie this
       // design keeps refusing to tell. Shaping per result also means the note
       // reports each result's own reduction rather than the total.
       const shown = hasShaping(entry.output) ? shapeOutput(text, entry.output) : text;
-      stepResults.push(wanted > 1 ? `--- ${briefArgs(args)} ---\n${shown}` : shown);
+      showns.push(wanted > 1 ? `--- ${briefArgs(args)} ---\n${shown}` : shown);
     }
 
-    previous = stepResults.join("\n\n");
-    pieces.push(previous);
+    // Extraction reads the unshaped answers; the caller reads the shaped ones.
+    raw = raws.join("\n\n");
+    display = showns.join("\n\n");
   }
 
-  return { text: pieces[pieces.length - 1] ?? first, trace };
+  return { text: display, trace };
 }
 
 /** A step's arguments written short, to label one of several fanned-out results. */
@@ -2084,7 +2101,12 @@ function installProfileAwareCall(mcp: McpServer): boolean {
     const resolved = await resolveProfile(PROFILE_ROOT, { meta, clientName, session });
     // Resolved against the same registered list the listing was shaped from, so
     // an alias is callable exactly while the surface defines it.
-    const entry = boundArgsFor(resolved.profile, request.params.name, await listRegisteredTools());
+    const entry = boundArgsFor(
+      resolved.profile,
+      request.params.name,
+      await listRegisteredTools(),
+      resolved.mutatingArgs,
+    );
     if (entry === null) return original(request, extra);
 
     const supplied = request.params.arguments ?? {};
@@ -2128,6 +2150,7 @@ function installProfileAwareCall(mcp: McpServer): boolean {
         entry,
         resolved.profile,
         registered,
+        resolved.mutatingArgs,
         rawTextOf(result),
         (name, args) =>
           original({ ...request, params: { ...request.params, name, arguments: args } }, extra),
@@ -2243,6 +2266,7 @@ type PickEntry =
  */
 async function pickSurface(
   entries: PickEntry[],
+  mutatingArgs: Record<string, string[]>,
 ): Promise<{ failure: string } | { profile: ModelProfile; unknown: string[] }> {
   const all = await listRegisteredTools();
   if (all.length === 0) return { failure: "The tool catalogue is unavailable in this build." };
@@ -2406,6 +2430,24 @@ async function pickSurface(
         problems.push(
           `step ${position} calls \`${step.tool}\`, which is itself a chain; chains cannot nest, ` +
             "because a sequence you can read is the point",
+        );
+        continue;
+      }
+
+      // A step may not fill an argument that changes session state. The chain
+      // would reconfigure the caller's own tooling as a side effect of a tool
+      // call, and would change what the remaining steps resolve against, so a
+      // fixed sequence would stop being deterministic. Refused rather than
+      // dropped, because a model that asked for a step and silently did not get
+      // one has been lied to.
+      const mutating = mutatingArgs[targetTool] ?? [];
+      const filled = [...Object.keys(step.extract ?? {}), ...Object.keys(stepAlias?.args ?? {})];
+      const offender = filled.find((name) => mutating.includes(name));
+      if (offender !== undefined) {
+        problems.push(
+          `step ${position} fills \`${offender}\` of \`${targetTool}\`, which changes session ` +
+            "state; a chain must not reconfigure the surface it is running under. Read it instead, " +
+            "or call it outside a chain",
         );
         continue;
       }
@@ -2688,11 +2730,15 @@ async function renderToolDetail(name: string): Promise<string> {
 }
 
 /** Every registered tool, marking what the active surface carries. */
-async function renderCatalogue(profile: ModelProfile, core: readonly string[]): Promise<string> {
+async function renderCatalogue(
+  profile: ModelProfile,
+  core: readonly string[],
+  mutatingArgs: Record<string, string[]>,
+): Promise<string> {
   const all = await listRegisteredTools();
   if (all.length === 0) return "The tool catalogue is unavailable in this build.";
 
-  const carried = new Set(shapeTools(all, profile, core).map((tool) => tool.name));
+  const carried = new Set(shapeTools(all, profile, core, mutatingArgs).map((tool) => tool.name));
   const render = (tools: ToolListResult["tools"]) =>
     tools
       .map(
@@ -2727,6 +2773,7 @@ async function renderSurface(
   matched: string | null,
   clientName: string | null,
   core: readonly string[],
+  mutatingArgs: Record<string, string[]>,
 ): Promise<string> {
   const why = matched
     ? `selected by \`${source}\` matching \`${matched}\``
@@ -2737,7 +2784,7 @@ async function renderSurface(
     : "";
 
   const all = await listRegisteredTools();
-  const carried = shapeTools(all, profile, core).map((tool) => tool.name);
+  const carried = shapeTools(all, profile, core, mutatingArgs).map((tool) => tool.name);
   const carriedSet = new Set(carried);
   const rest = all.filter((tool) => !carriedSet.has(tool.name));
 
@@ -2786,11 +2833,12 @@ async function saveSurface(
   guidance: string | undefined,
   current: ModelProfile,
   core: readonly string[],
+  mutatingArgs: Record<string, string[]>,
 ): Promise<{ failure: string } | { profile: ModelProfile; replaced: boolean }> {
   const { profiles } = await loadSurfaces(PROFILE_ROOT, { fresh: true });
   const replaced = profiles.has(id);
 
-  const tools = shapeTools(await listRegisteredTools(), current, core)
+  const tools = shapeTools(await listRegisteredTools(), current, core, mutatingArgs)
     .map((tool) => tool.name)
     .filter((name) => name !== "");
 
@@ -2954,7 +3002,11 @@ server.tool(
     // Apply any change before resolving, so the report describes the surface the
     // caller now has rather than the one they just left.
     if (pick !== undefined) {
-      const outcome = await pickSurface(pick);
+      // The mutating-argument rule is manifest data, not session state, so it is
+      // read directly: the resolution below describes the surface AFTER this
+      // change, and would not be available yet.
+      const { manifest } = await loadSurfaces(PROFILE_ROOT);
+      const outcome = await pickSurface(pick, manifest.mutatingArgs);
       if ("failure" in outcome) return err(outcome.failure);
       setSessionSurface({ kind: "picked", profile: outcome.profile });
       if (outcome.unknown.length) {
@@ -2970,7 +3022,7 @@ server.tool(
     const { profile, core } = resolved;
 
     if (save !== undefined) {
-      const outcome = await saveSurface(save, guidance, profile, core);
+      const outcome = await saveSurface(save, guidance, profile, core, resolved.mutatingArgs);
       if ("failure" in outcome) return err(outcome.failure);
       notes.push(
         outcome.replaced
@@ -2981,7 +3033,7 @@ server.tool(
 
     if (detail !== undefined) return ok(await renderToolDetail(detail));
     if (list === "surfaces") return ok(await renderSurfaces(profile.id));
-    if (list === "tools") return ok(await renderCatalogue(profile, core));
+    if (list === "tools") return ok(await renderCatalogue(profile, core, resolved.mutatingArgs));
 
     const report = await renderSurface(
       profile,
@@ -2989,6 +3041,7 @@ server.tool(
       resolved.matched,
       clientName,
       core,
+      resolved.mutatingArgs,
     );
     return ok(notes.length ? `${notes.join("\n")}\n\n${report}` : report);
   },

@@ -299,6 +299,18 @@ The last two matter most. A chain that half-runs and says nothing useful is wors
 than one that never started, and silently reading one of the three things you
 asked for is the kind of lie this design keeps refusing to tell.
 
+Two rules that make a chain predictable:
+
+- **Extraction reads the raw answer, at every step.** `output` shaping is for the
+  reader; a rule meant for eyes must not decide what flows between steps. (It
+  once read raw for step 2 and shaped for step 3 — the same chain behaving
+  differently by position.)
+- **A step may not fill an argument that changes session state.** Otherwise a
+  chain could reconfigure the surface it is running under, and change what the
+  remaining steps resolve against. Reading the surface tool as a step is fine;
+  `pick`, `save` and `set` are not. Which arguments those are is declared in
+  `profiles/manifest.json`, so a second mutating tool costs a line of data.
+
 ### Shaping the answer
 
 The mirror of shaping the call. A tool that returns a thousand lines is unusable;
