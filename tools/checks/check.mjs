@@ -1026,13 +1026,13 @@ const CHECKS = {
           description: "Hand-edited entries that pick would refuse; must never survive a run.",
           match: { clientNames: [], models: [] },
           tools: {
-            include: ["search_skills", "dup"],
-            order: ["search_skills", "dup"],
+            include: ["list_agents", "dup"],
+            order: ["list_agents", "dup"],
             exclude: [],
             descriptions: {},
             derived: [
               {
-                as: "search_skills",
+                as: "list_agents",
                 tool: "read_agent",
                 args: { name: "exploit-developer" },
                 argDescriptions: {},
@@ -1043,12 +1043,7 @@ const CHECKS = {
                 args: { name: "exploit-developer" },
                 argDescriptions: {},
               },
-              {
-                as: "dup",
-                tool: "search_skills",
-                args: { query: "kdmapper" },
-                argDescriptions: {},
-              },
+              { as: "dup", tool: "list_agents", args: {}, argDescriptions: {} },
               { as: "typo", tool: "read_agent", args: { nmae: "x" }, argDescriptions: {} },
             ],
           },
@@ -1063,11 +1058,13 @@ const CHECKS = {
       const listed = await callServer([listTools(1, meta)]);
       const names = toolNames(listed.get(1));
 
-      // The stolen name must still be the real tool.
-      const real = await callServer([toolCall(1, "search_skills", { query: "kdmapper" }, meta)]);
+      // The stolen name must still be the real tool. Both probes read the
+      // committed agents/ tree rather than the skill archive, which a CI
+      // checkout cannot materialise.
+      const real = await callServer([toolCall(1, "list_agents", {}, meta)]);
       assert(!real.get(1)?.result?.isError, "the real tool was not callable");
       assert(
-        /kdmapper/i.test(textOf(real.get(1))),
+        /Available agents \(\d+\)/.test(textOf(real.get(1))),
         "a hand-edited file hijacked a registered tool's name",
       );
 
@@ -1081,18 +1078,19 @@ const CHECKS = {
       const called = await callServer([toolCall(1, "dup", {}, meta)]);
 
       // The markers must be unambiguous: read_agent answers with an agent body,
-      // search_skills with a result list, and neither description mentions the
-      // other's business. A loose match here would pass on either branch.
+      // list_agents with a category listing, and neither description mentions
+      // the other's business. A loose match here would pass on either branch,
+      // which is how the first version of this check missed the duplicate bug.
       const describesRead = /full definition and system prompt/.test(shown?.description ?? "");
-      const describesSearch = /Scored keyword search/.test(shown?.description ?? "");
+      const describesList = /grouped by category/.test(shown?.description ?? "");
       const callsRead = textOf(called.get(1)).includes("# Agent:");
-      const callsSearch = /Found \d+ skills/.test(textOf(called.get(1)));
+      const callsList = /Available agents \(\d+\)/.test(textOf(called.get(1)));
 
       assert(
-        describesRead !== describesSearch,
+        describesRead !== describesList,
         `the listing describes neither entry cleanly: ${(shown?.description ?? "").slice(0, 80)}`,
       );
-      assert(callsRead !== callsSearch, "the call matched neither entry cleanly");
+      assert(callsRead !== callsList, "the call matched neither entry cleanly");
       assert(
         describesRead === callsRead,
         `the listing and the call disagree about \`dup\`: listing says read_agent=${describesRead}, ` +

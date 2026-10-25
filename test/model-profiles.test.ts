@@ -596,13 +596,13 @@ describe("a surface cannot lie", () => {
           description: "Hand-edited entries that pick would refuse. Must never survive a run.",
           match: { clientNames: [], models: [] },
           tools: {
-            include: ["search_skills", "dup"],
-            order: ["search_skills", "dup"],
+            include: ["list_agents", "dup"],
+            order: ["list_agents", "dup"],
             exclude: [],
             descriptions: {},
             derived: [
               {
-                as: "search_skills",
+                as: "list_agents",
                 tool: "read_agent",
                 args: { name: "exploit-developer" },
                 argDescriptions: {},
@@ -613,12 +613,7 @@ describe("a surface cannot lie", () => {
                 args: { name: "exploit-developer" },
                 argDescriptions: {},
               },
-              {
-                as: "dup",
-                tool: "search_skills",
-                args: { query: "kdmapper" },
-                argDescriptions: {},
-              },
+              { as: "dup", tool: "list_agents", args: {}, argDescriptions: {} },
               { as: "typo", tool: "read_agent", args: { nmae: "x" }, argDescriptions: {} },
             ],
           },
@@ -633,9 +628,11 @@ describe("a surface cannot lie", () => {
       const listed = await callServer([listTools(1, meta)]);
       const names = toolNames(listed.get(1));
 
-      // A stolen name must still be the real tool.
-      const real = await callServer([toolCall(1, "search_skills", { query: "kdmapper" }, meta)]);
-      expect(textOf(real.get(1))).toMatch(/kdmapper/i);
+      // A stolen name must still be the real tool. Both probes read the committed
+      // agents/ tree rather than the skill archive, which a CI checkout cannot
+      // materialise and which this suite must not depend on.
+      const real = await callServer([toolCall(1, "list_agents", {}, meta)]);
+      expect(textOf(real.get(1))).toMatch(/Available agents \(\d+\)/);
 
       // An entry that cannot be honoured is dropped, not approximated.
       expect(names).not.toContain("typo");
@@ -644,7 +641,14 @@ describe("a surface cannot lie", () => {
       const shown = (listed.get(1)?.result?.tools ?? []).find((tool) => tool.name === "dup");
       const called = await callServer([toolCall(1, "dup", {}, meta)]);
       const describesRead = /full definition and system prompt/.test(shown?.description ?? "");
+      const describesList = /grouped by category/.test(shown?.description ?? "");
       const callsRead = textOf(called.get(1)).includes("# Agent:");
+      const callsList = /Available agents \(\d+\)/.test(textOf(called.get(1)));
+
+      // Unambiguous on both sides: a loose match would pass on either branch,
+      // which is how the first version of this check missed the duplicate bug.
+      expect(describesRead).not.toBe(describesList);
+      expect(callsRead).not.toBe(callsList);
       expect(describesRead).toBe(callsRead);
     } finally {
       rmSync(path, { force: true });
