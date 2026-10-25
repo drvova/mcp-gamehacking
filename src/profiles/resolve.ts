@@ -465,7 +465,7 @@ export function compilePattern(pattern: string): { regex: RegExp } | { problem: 
 export function extractValues(
   text: string,
   pattern: string,
-): { values: string[] } | { problem: string } {
+): { values: string[]; capped: boolean } | { problem: string } {
   const compiled = compilePattern(pattern);
   if ("problem" in compiled) return compiled;
 
@@ -485,7 +485,11 @@ export function extractValues(
     match = scan.exec(text);
   }
 
-  return { values };
+  // Whether the cap was reached is reported, not swallowed. A pattern that
+  // matched more than the cap yields the first fifty values, and a model that
+  // cannot tell fifty from seventy-five will reason about the wrong set - the
+  // same silent-truncation defect that output shaping exists to avoid.
+  return { values, capped: match !== null };
 }
 
 /** Whether a chain would run anything. */

@@ -1992,12 +1992,24 @@ async function runChain(
     const targetName = alias?.tool ?? step.tool;
 
     const perArgument = new Map<string, string[]>();
+    const capped: string[] = [];
     for (const name of names) {
       const outcome = extractValues(raw, step.extract[name] ?? "");
       if ("problem" in outcome) {
         return { failure: `Step ${position} (${step.tool}): ${outcome.problem}` };
       }
+      if (outcome.capped) capped.push(name);
       perArgument.set(name, outcome.values);
+    }
+
+    // A capped extraction is reported rather than swallowed: the pattern matched
+    // more than the cap, so the values in hand are the first fifty and the model
+    // needs to know that before reasoning about them.
+    if (capped.length > 0) {
+      trace.push(
+        `[${position}] ${step.tool}: ${capped.join(", ")} matched more than 50 values, ` +
+          "so only the first 50 are available — narrow the pattern to see the rest",
+      );
     }
 
     const matched =

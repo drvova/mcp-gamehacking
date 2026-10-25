@@ -305,6 +305,10 @@ Two rules that make a chain predictable:
   reader; a rule meant for eyes must not decide what flows between steps. (It
   once read raw for step 2 and shaped for step 3 — the same chain behaving
   differently by position.)
+- **An extraction that matched more than 50 values says so.** The cap exists so a
+  broad pattern cannot pull tens of thousands of values, but a model that cannot
+  tell fifty from seventy-five reasons about the wrong set, so reaching the cap
+  is reported in the trace and a narrow pattern stays silent.
 - **A step may not fill an argument that changes session state.** Otherwise a
   chain could reconfigure the surface it is running under, and change what the
   remaining steps resolve against. Reading the surface tool as a step is fine;

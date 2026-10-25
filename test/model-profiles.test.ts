@@ -1645,6 +1645,63 @@ describe("the chain runner's own edges", () => {
     }
   });
 
+  it("says so when an extraction matched more than the cap", async () => {
+    const session = await openSession();
+    try {
+      // 75 agents match, the cap is 50, so the values in hand are the first
+      // fifty. A model that cannot tell fifty from seventy-five reasons about
+      // the wrong set — the same silent-truncation defect output shaping exists
+      // to avoid, and it was swallowed here until this test.
+      await session.request(
+        toolCall(1, "surface", {
+          pick: [
+            {
+              tool: "list_agents",
+              as: "broad",
+              then: [{ tool: "read_agent", extract: { name: AGENT_NAME }, take: 1 }],
+            },
+          ],
+        }),
+      );
+
+      const text = textOf(await session.request(toolCall(2, "broad", {})));
+      expect(text).toMatch(/matched more than 50 values/);
+      expect(text).toMatch(/narrow the pattern/);
+    } finally {
+      session.close();
+    }
+  });
+
+  it("stays silent when nothing was capped", async () => {
+    const session = await openSession();
+    try {
+      // A note that cries wolf is its own small lie, so a narrow pattern must
+      // not carry the warning.
+      await session.request(
+        toolCall(1, "surface", {
+          pick: [
+            {
+              tool: "list_agents",
+              as: "narrow",
+              then: [
+                {
+                  tool: "read_agent",
+                  extract: { name: "- \\*\\*(anti-cheat-analyst)\\*\\*" },
+                },
+              ],
+            },
+          ],
+        }),
+      );
+
+      const text = textOf(await session.request(toolCall(2, "narrow", {})));
+      expect(text).not.toMatch(/matched more than 50/);
+      expect(text).toContain("# Agent: anti-cheat-analyst");
+    } finally {
+      session.close();
+    }
+  });
+
   it("does not let a chain change the surface it is running under", async () => {
     const session = await openSession();
     try {

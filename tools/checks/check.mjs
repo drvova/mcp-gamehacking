@@ -1992,6 +1992,62 @@ const CHECKS = {
       readSession.close();
     }
 
+    // (4) An extraction that reached the value cap says so. 75 agents match the
+    // broad pattern and the cap is 50, so the values in hand are the first fifty
+    // - a model that cannot tell fifty from seventy-five reasons about the wrong
+    // set, which is the silent-truncation defect output shaping exists to avoid.
+    const cappedSession = await openSession();
+    try {
+      await cappedSession.request(
+        toolCall(1, "surface", {
+          pick: [
+            {
+              tool: "list_agents",
+              as: "broad",
+              then: [{ tool: "read_agent", extract: { name: AGENT_NAME }, take: 1 }],
+            },
+          ],
+        }),
+      );
+      const capped = textOf(await cappedSession.request(toolCall(2, "broad", {})));
+      assert(
+        /matched more than 50 values/.test(capped),
+        `a capped extraction was silent: ${capped.slice(0, 200)}`,
+      );
+    } finally {
+      cappedSession.close();
+    }
+
+    // And a note that cries wolf is its own small lie, so a narrow pattern must
+    // not carry the warning.
+    const narrowSession = await openSession();
+    try {
+      await narrowSession.request(
+        toolCall(1, "surface", {
+          pick: [
+            {
+              tool: "list_agents",
+              as: "narrow",
+              then: [
+                {
+                  tool: "read_agent",
+                  extract: { name: "- \\*\\*(anti-cheat-analyst)\\*\\*" },
+                },
+              ],
+            },
+          ],
+        }),
+      );
+      const narrow = textOf(await narrowSession.request(toolCall(2, "narrow", {})));
+      assert(
+        !/matched more than 50/.test(narrow),
+        "a rule that capped nothing still reported a cap",
+      );
+      assert(narrow.includes("# Agent: anti-cheat-analyst"), "the narrow chain did not run");
+    } finally {
+      narrowSession.close();
+    }
+
     pass("chain-integrity");
   },
 
