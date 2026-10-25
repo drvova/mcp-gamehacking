@@ -365,6 +365,22 @@ that got no answer at all. Three consequences of that rule:
 `head` with `tail` is refused as ambiguous, and a pattern that will not compile is
 refused by name — a rule that cannot do what it says is worse than no rule.
 
+### What cannot be changed
+
+Three guards protect the floor, each because removing it takes away the way back:
+
+| guard                                | why                                                                                                         |
+| ------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
+| a shipped surface cannot be replaced | it is what an unrecognised caller lands on; replacing the seed would leave no way to discover the catalogue |
+| the runtime id is reserved           | the engine uses it for a surface composed in memory, so a file under that name would mean two things        |
+| a mistyped rule is refused           | `minimun` used to be accepted and ignored, leaving the model reasoning as if a range were in force          |
+
+The first is enforced at **both** layers — `save` refuses it with a reason, and
+the loader refuses an authored file whose id collides with a shipped one, because
+a file written straight to disk never passes through `save`. A refused
+replacement is reported in `list: "surfaces"` rather than swallowed: silent
+rejection would leave a model wondering why nothing changed.
+
 ### What the server does ship
 
 Exactly one surface, and it is not a choice:
