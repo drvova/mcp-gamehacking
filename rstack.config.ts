@@ -14,6 +14,12 @@ define.lib({
 
 define.test({
   include: ["test/**/*.test.ts"],
+  // These are integration tests: each one spawns a real server process and
+  // exchanges JSON-RPC with it. Under parallel load a spawn plus a round-trip
+  // can exceed the 5s default, which shows up as a spurious timeout rather than
+  // a failure. The work itself is bounded by the per-request deadline in the
+  // harness, so a generous ceiling here does not mask a genuine hang.
+  testTimeout: 30_000,
 });
 
 define.lint(({ js, ts }) => [

@@ -8,10 +8,8 @@ import {
   SERVER,
   SKILLS_DIR,
   callServer,
-  listTools,
   textOf,
   toolCall,
-  toolNames,
 } from "./helpers/mcp.js";
 
 /** Every tool the server must expose. */

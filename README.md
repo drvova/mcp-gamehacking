@@ -202,15 +202,36 @@ everything-surface.
 
 ### Built-in profiles
 
-| Profile   | Surface                                        |
-| --------- | ---------------------------------------------- |
-| `default` | the 7-tool seed                                |
-| `full`    | all 32, registration order, server wording     |
-| `claude`  | curated-first, with cross-check guidance       |
-| `gpt`     | short deterministic sequences, compact results |
-| `gemini`  | aggregation-first, per-claim attribution       |
-| `compact` | 5 tools, search weighted over reading          |
-| `local`   | 4 tools, single-argument, no composition       |
+| Profile   | Surface                                          |
+| --------- | ------------------------------------------------ |
+| `default` | the 7-tool seed                                  |
+| `full`    | all 32, registration order, server wording       |
+| `claude`  | curated-first, with cross-check guidance         |
+| `gpt`     | short deterministic sequences, compact results   |
+| `gemini`  | aggregation-first, per-claim attribution         |
+| `compact` | 5 working tools, search weighted over reading    |
+| `local`   | 4 working tools, single-argument, no composition |
+
+### The surface core
+
+Four tools are carried by **every** surface, whatever else a profile drops:
+
+```
+get_model_profile      which surface governs this session, and why
+list_model_profiles    the surfaces already built
+list_available_tools   every registered tool, carried or not
+set_model_profile      switch to a different surface
+```
+
+A profile may choose to be narrow; it may not choose to be _inescapable_. Without
+these, a model auto-detected into `local` could neither see that a profile
+governed it nor leave — a capability loss caused by withheld knowledge, landing
+hardest on exactly the small models least able to guess a tool name.
+
+The core is enforced in the shaper, which every profile passes through, so it
+holds for built-ins, authored profiles, and files edited by hand on disk. An
+authored profile that tries to exclude one is told so, and the exclusion is
+dropped rather than silently honoured.
 
 ### Authoring a profile
 

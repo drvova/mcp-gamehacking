@@ -1,4 +1,4 @@
-import { DEFAULT_PROFILE_ID } from "./builtin.js";
+import { DEFAULT_PROFILE_ID, SURFACE_TOOLS } from "./builtin.js";
 import { findProfile, loadProfiles } from "./registry.js";
 import type { ModelProfile, ResolvedProfile } from "./types.js";
 
@@ -55,8 +55,8 @@ export type ResolveInput = {
  *
  * Precedence, highest first: an explicit `_meta.profile`, a `_meta.model`
  * match, the session override, an environment variable, the client name, and
- * finally the neutral default. Every step falls through on a miss, so an
- * unrecognised caller always lands on the full default surface.
+ * finally the seed. Every step falls through on a miss, so an unrecognised
+ * caller always lands on the seed surface rather than on an unfitted one.
  */
 export async function resolveProfile(
   root: string,
@@ -118,13 +118,20 @@ export function shapeTools<T extends ShapeableTool>(tools: T[], profile: ModelPr
   const available = new Set(tools.map((tool) => tool.name));
   const { include, exclude, order, descriptions } = profile.tools;
 
+  // The surface core is enforced here rather than trusted to each profile,
+  // because this is the single chokepoint every profile passes through: built-in,
+  // authored, or hand-edited on disk. A profile may choose to be narrow; it may
+  // not choose to be inescapable, so these survive both `include` and `exclude`.
+  const core = new Set(SURFACE_TOOLS);
+
   let shaped = tools;
   if (include && include.length > 0) {
     const kept = new Set(include.filter((name) => available.has(name)));
+    for (const name of SURFACE_TOOLS) if (available.has(name)) kept.add(name);
     if (kept.size > 0) shaped = shaped.filter((tool) => kept.has(tool.name));
   }
 
-  const excluded = new Set(exclude);
+  const excluded = new Set(exclude.filter((name) => !core.has(name)));
   const filtered = shaped.filter((tool) => !excluded.has(tool.name));
   const selected = filtered.length > 0 ? filtered : tools;
 

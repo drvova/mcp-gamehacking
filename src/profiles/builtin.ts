@@ -22,6 +22,31 @@ const BOOTSTRAP_TOOLS = [
   "read_skill",
 ];
 
+/**
+ * Tools every surface must carry, whatever else it drops.
+ *
+ * Without these a narrow profile becomes a trap: the model cannot see that a
+ * profile governs it, cannot discover what else exists, and cannot switch. That
+ * is a capability loss caused by withheld knowledge rather than by policy, and
+ * it would land hardest on exactly the small models least able to guess a tool
+ * name. A profile may choose to be narrow; it may not choose to be inescapable.
+ */
+export const SURFACE_TOOLS = [
+  "get_model_profile",
+  "list_model_profiles",
+  "list_available_tools",
+  "set_model_profile",
+];
+
+/**
+ * Append the mandatory surface tools to a profile's own list, preserving the
+ * author's order and adding only what is missing.
+ */
+function withSurfaceTools(tools: string[]): string[] {
+  const present = new Set(tools);
+  return [...tools, ...SURFACE_TOOLS.filter((name) => !present.has(name))];
+}
+
 const DEFINITIONS = [
   {
     id: "default",
@@ -199,14 +224,26 @@ const DEFINITIONS = [
     id: "compact",
     label: "Compact context",
     description:
-      "Five high-yield tools for a small context window, weighted toward search over reading.",
+      "Five working tools plus the surface core, for a small context window, weighted toward search over reading.",
     match: {
       clientNames: ["compact", "small"],
       models: ["small", "mini", "nano", "flash", "lite"],
     },
     tools: {
-      include: ["search_skills", "read_skill", "skill_stats", "list_skills", "get_file_tree"],
-      order: ["search_skills", "read_skill", "skill_stats", "list_skills", "get_file_tree"],
+      include: withSurfaceTools([
+        "search_skills",
+        "read_skill",
+        "skill_stats",
+        "list_skills",
+        "get_file_tree",
+      ]),
+      order: withSurfaceTools([
+        "search_skills",
+        "read_skill",
+        "skill_stats",
+        "list_skills",
+        "get_file_tree",
+      ]),
       descriptions: {
         search_skills: "Narrow first. One specific query, then stop searching and read.",
         read_skill: "The distilled write-up. Cheapest way to a real answer.",
@@ -216,9 +253,9 @@ const DEFINITIONS = [
       },
     },
     guidance:
-      "Your budget is small, so treat every read as expensive. Five tools are carried here for that reason.\n\n" +
+      "Your budget is small, so treat every read as expensive. Five working tools are carried here for that reason, plus the four that describe and change your own surface.\n\n" +
       "Never call `read_source` without a specific question: a single archive can exceed 100,000 lines. Work in one direction — narrow with `search_skills`, read the write-up with `read_skill`, and stop once you can answer.\n\n" +
-      "If you need more than these five, say so and take a wider profile rather than working around the gap.",
+      "If the five working tools are not enough, call `list_available_tools` to see everything that exists and `set_model_profile` to take a wider surface. Working around the gap costs more than switching does.",
     workflow: [
       "search_skills once, with the most specific query you can form.",
       "read_skill on the single best hit.",
@@ -229,14 +266,14 @@ const DEFINITIONS = [
     id: "local",
     label: "Local / small model",
     description:
-      "Four unambiguous single-argument tools. Avoids multi-step composition and large output.",
+      "Four unambiguous single-argument tools plus the surface core. Avoids multi-step composition and large output.",
     match: {
       clientNames: ["ollama", "lmstudio", "llama", "local"],
       models: ["llama", "qwen", "mistral", "phi"],
     },
     tools: {
-      include: ["search_skills", "read_skill", "skill_stats", "get_file_tree"],
-      order: ["search_skills", "read_skill", "skill_stats", "get_file_tree"],
+      include: withSurfaceTools(["search_skills", "read_skill", "skill_stats", "get_file_tree"]),
+      order: withSurfaceTools(["search_skills", "read_skill", "skill_stats", "get_file_tree"]),
       descriptions: {
         search_skills:
           "Takes a plain query string. If nothing useful comes back, try one distinctive word rather than a sentence.",
@@ -246,9 +283,9 @@ const DEFINITIONS = [
       },
     },
     guidance:
-      "Four tools are carried, all with simple arguments. Use them one at a time and do not chain steps speculatively.\n\n" +
+      "Four working tools are carried, all with simple arguments, plus the four that describe and change your own surface. Use them one at a time and do not chain steps speculatively.\n\n" +
       "`search_skills` takes a plain query string; if the first query returns nothing useful, try a single distinctive word rather than a sentence. `read_skill` takes one exact skill name copied from a search result. `get_file_tree` needs a project name and `max_entries` of at least 10.\n\n" +
-      "The offset, grep and source tools are deliberately absent: they need careful arguments and produce large output.",
+      "The offset, grep and source tools are deliberately absent: they need careful arguments and produce large output. If you need one, `list_available_tools` shows what exists and `set_model_profile` moves you to a surface that carries it.",
     workflow: [
       "skill_stats to confirm the library is reachable.",
       "search_skills with one distinctive word.",

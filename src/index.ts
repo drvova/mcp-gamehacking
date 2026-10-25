@@ -6,6 +6,7 @@ import { readdir, readFile, stat } from "fs/promises";
 import { join, resolve } from "path";
 import { createReadStream, readFileSync } from "fs";
 import { createInterface } from "readline";
+import { SURFACE_TOOLS } from "./profiles/builtin.js";
 import { loadProfiles, saveProfile } from "./profiles/registry.js";
 import {
   getSessionProfile,
@@ -1843,8 +1844,8 @@ async function listRegisteredTools(): Promise<ToolListResult["tools"]> {
  * McpServer keeps its handlers in a private map with no public accessor, so the
  * existing handler is read through a narrow structural type and wrapped, instead
  * of reimplementing the SDK's own schema conversion. If that internal shape is
- * ever absent the SDK handler is left untouched and the unshaped surface is
- * served: the profile layer degrades to a no-op rather than breaking the server.
+ * ever absent the SDK handler is left untouched and the raw surface is served:
+ * the profile layer degrades to a no-op rather than breaking the server.
  */
 function installProfileAwareToolList(mcp: McpServer): boolean {
   const protocol = mcp.server as unknown as {
@@ -1965,7 +1966,7 @@ server.tool(
 
     const why = matched
       ? `selected by \`${source}\` matching \`${matched}\``
-      : "no signal matched, so the neutral default applies";
+      : "no signal matched, so the seed surface applies";
 
     const steps = profile.workflow.length
       ? `\n\n## Recommended workflow\n${profile.workflow.map((step, i) => `${i + 1}. ${step}`).join("\n")}`
@@ -2042,6 +2043,19 @@ server.tool(
     workflow: z.array(z.string()).optional().describe("Ordered working steps for this model"),
   },
   async (args) => {
+    // A profile may choose to be narrow, but never inescapable. The surface core
+    // is added to any explicit include list and removed from any exclude list, so
+    // the saved file states what the model actually gets. `shapeTools` enforces
+    // the same rule at request time, which also covers hand-edited files.
+    const requested = args.tool_include;
+    const excluded = (args.tool_exclude ?? []).filter((name) => !SURFACE_TOOLS.includes(name));
+    const droppedFromExclude = (args.tool_exclude ?? []).filter((name) =>
+      SURFACE_TOOLS.includes(name),
+    );
+    const added =
+      requested === undefined ? [] : SURFACE_TOOLS.filter((name) => !requested.includes(name));
+    const include = requested === undefined ? undefined : [...requested, ...added];
+
     let saved;
     try {
       saved = await saveProfile(PROFILE_ROOT, {
@@ -2052,8 +2066,8 @@ server.tool(
         match: { clientNames: args.client_names ?? [], models: args.models ?? [] },
         tools: {
           order: args.tool_order ?? [],
-          include: args.tool_include,
-          exclude: args.tool_exclude ?? [],
+          include,
+          exclude: excluded,
           descriptions: args.tool_descriptions ?? {},
         },
         workflow: args.workflow ?? [],
@@ -2066,8 +2080,26 @@ server.tool(
     }
 
     const where = `model-profiles/${saved.id}.json`;
+    const notes: string[] = [];
+    if (added.length) {
+      notes.push(
+        `Added the surface core, so this profile cannot trap a model: ${added
+          .map((name) => `\`${name}\``)
+          .join(", ")}. Without them a narrow surface cannot report or change itself.`,
+      );
+    }
+    if (droppedFromExclude.length) {
+      notes.push(
+        `Ignored the exclusion of ${droppedFromExclude
+          .map((name) => `\`${name}\``)
+          .join(", ")}: the surface core cannot be removed.`,
+      );
+    }
+
+    const surfaceNote = notes.length ? `\n\n${notes.join("\n\n")}` : "";
+
     return ok(
-      `Profile \`${saved.id}\` saved to ${where}.\n\n` +
+      `Profile \`${saved.id}\` saved to ${where}.${surfaceNote}\n\n` +
         `Select it with \`set_model_profile\`, or let it auto-select by naming this client in \`client_names\` or the model in \`models\`.`,
     );
   },

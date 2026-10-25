@@ -203,7 +203,16 @@ describe("per-tool wording", () => {
         const listing = await session.request(listTools(2));
 
         const tools = listing?.result?.tools ?? [];
-        expect(tools.map((tool) => tool.name)).toEqual(["skill_stats", "search_skills"]);
+        // The author's own tools first, then the surface core the server
+        // guarantees so a profile can never trap a model.
+        expect(tools.map((tool) => tool.name)).toEqual([
+          "skill_stats",
+          "search_skills",
+          "get_model_profile",
+          "list_model_profiles",
+          "list_available_tools",
+          "set_model_profile",
+        ]);
 
         const described = tools.find((tool) => tool.name === "search_skills");
         expect(String(described?.description ?? "")).toContain("PROBE WORDING");
@@ -218,7 +227,7 @@ describe("per-tool wording", () => {
 });
 
 describe("per-request overrides", () => {
-  it("honours _meta.profile and leaves the unshaped surface without it", async () => {
+  it("honours _meta.profile and falls back to the seed without it", async () => {
     const responses = await callServer([
       listTools(1, { profile: "compact" }),
       listTools(2),
@@ -231,6 +240,10 @@ describe("per-request overrides", () => {
       "skill_stats",
       "list_skills",
       "get_file_tree",
+      "get_model_profile",
+      "list_model_profiles",
+      "list_available_tools",
+      "set_model_profile",
     ]);
     expect(toolNames(responses.get(2))).toEqual(SEED_SURFACE);
     // An unknown id must fall through rather than blank the surface.
@@ -268,6 +281,10 @@ describe("session override", () => {
         "read_skill",
         "skill_stats",
         "get_file_tree",
+        "get_model_profile",
+        "list_model_profiles",
+        "list_available_tools",
+        "set_model_profile",
       ]);
 
       const cleared = await session.request(toolCall(3, "set_model_profile", { id: "auto" }));
@@ -296,6 +313,79 @@ describe("session override", () => {
   });
 });
 
+describe("surface escape guarantee", () => {
+  const CORE = [
+    "get_model_profile",
+    "list_model_profiles",
+    "list_available_tools",
+    "set_model_profile",
+  ];
+
+  it("carries the surface core on every built-in profile, however narrow", async () => {
+    const responses = await callServer([
+      listTools(1, { profile: "default" }),
+      listTools(2, { profile: "full" }),
+      listTools(3, { profile: "claude" }),
+      listTools(4, { profile: "gpt" }),
+      listTools(5, { profile: "gemini" }),
+      listTools(6, { profile: "compact" }),
+      listTools(7, { profile: "local" }),
+    ]);
+
+    for (const id of [1, 2, 3, 4, 5, 6, 7]) {
+      const names = toolNames(responses.get(id));
+      expect(names.length).toBeGreaterThan(0);
+      for (const tool of CORE) {
+        expect(names, `profile at request ${id} does not carry ${tool}`).toContain(tool);
+      }
+    }
+  });
+
+  it("refuses to let an authored profile exclude the surface core", async () => {
+    const probe = cleanupProbe();
+    try {
+      const created = await callServer([
+        toolCall(1, "define_model_profile", {
+          id: PROBE_ID,
+          label: "Trap Probe",
+          description: "Attempts to exclude the surface core",
+          guidance:
+            "This profile exists only to prove the surface core cannot be excluded, and must never survive a test run.",
+          tool_include: ["search_skills"],
+          tool_exclude: CORE,
+        }),
+      ]);
+      expect(wasRefused(created.get(1))).toBe(false);
+
+      const persisted = JSON.parse(readFileSync(probe, "utf8"));
+      for (const tool of CORE) {
+        expect(persisted.tools.exclude).not.toContain(tool);
+        expect(persisted.tools.include).toContain(tool);
+      }
+
+      const listing = await callServer([listTools(1, { profile: PROBE_ID })]);
+      for (const tool of CORE) expect(toolNames(listing.get(1))).toContain(tool);
+    } finally {
+      cleanupProbe();
+    }
+  });
+
+  it("lets a model on the narrowest surface actually widen it", async () => {
+    const session = await openSession();
+    try {
+      await session.request(toolCall(1, "set_model_profile", { id: "local" }));
+      const narrow = toolNames(await session.request(listTools(2)));
+
+      await session.request(toolCall(3, "set_model_profile", { id: "full" }));
+      const wide = toolNames(await session.request(listTools(4)));
+
+      expect(wide.length).toBeGreaterThan(narrow.length);
+    } finally {
+      session.close();
+    }
+  });
+});
+
 describe("model-authored profiles", () => {
   it("persists a profile that a later process can select", async () => {
     const path = cleanupProbe();
@@ -316,7 +406,15 @@ describe("model-authored profiles", () => {
 
     const persisted = JSON.parse(readFileSync(path, "utf8"));
     expect(persisted.id).toBe(PROBE_ID);
-    expect(persisted.tools.include).toEqual(["skill_stats", "search_skills"]);
+    // The author's tools first, then the surface core the server guarantees.
+    expect(persisted.tools.include).toEqual([
+      "skill_stats",
+      "search_skills",
+      "get_model_profile",
+      "list_model_profiles",
+      "list_available_tools",
+      "set_model_profile",
+    ]);
 
     // A separate process must see it, which proves persistence rather than cache.
     const session = await openSession();
@@ -328,7 +426,14 @@ describe("model-authored profiles", () => {
       expect(textOf(selected)).toContain(PROBE_ID);
 
       const listing = await session.request(listTools(3));
-      expect(toolNames(listing)).toEqual(["skill_stats", "search_skills"]);
+      expect(toolNames(listing)).toEqual([
+        "skill_stats",
+        "search_skills",
+        "get_model_profile",
+        "list_model_profiles",
+        "list_available_tools",
+        "set_model_profile",
+      ]);
     } finally {
       session.close();
     }
