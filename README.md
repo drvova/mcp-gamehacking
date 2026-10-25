@@ -16,90 +16,90 @@ MCP (Model Context Protocol) server for game hacking & reverse engineering. A st
 
 ### Agents
 
-| Agent | Description |
-|-------|------------|
-| `reverse-engineer` | Disassembly analysis, struct recovery, offset hunting, binary patching |
-| `exploit-developer` | Kernel exploits, BYOVD chains, EFI persistence, privilege escalation |
-| `anti-cheat-analyst` | BattlEye, EAC, Vanguard, VAC, FACEIT internals and bypass research |
-| `malware-analyst` | Cheat binary analysis, unpacking, IOC extraction, technique classification |
-| `cheat-developer` | ESP, aimbot, triggerbot, overlay rendering, UE/Unity/Source engine internals |
-| `driver-developer` | WDM/KMDF drivers, IOCTL comm, memory R/W, stealth loading |
-| `hypervisor-researcher` | Intel VMX, AMD SVM, EPT/NPT hooks, HV-based memory access |
-| `android-researcher` | Zygisk, KernelSU, frida, IL2CPP dumping, native hooking |
-| `network-analyst` | Game protocol RE, packet capture, MITM proxy, server emulation |
-| `cs2-specialist` | Counter-Strike 2 / Source 2 internals |
-| `valorant-specialist` | Valorant / UE4 fork / Vanguard interaction |
-| `fortnite-specialist` | Fortnite / UE5 / EAC interaction |
-| `apex-specialist` | Apex Legends / Source fork internals |
-| `unreal-engine-specialist` | UE4/UE5 GObjects, GNames, ProcessEvent, SDK gen |
-| `unity-specialist` | Unity Mono/IL2CPP, GameObjectManager, metadata |
-| `source-engine-specialist` | Source 1/2 ConVar, NetVar, ClientClass |
-| `injection-specialist` | All injection methods (manual map, reflective, APC, EFI) |
-| `hooking-specialist` | All hook types (VMT, IAT, inline, EPT, syscall) |
-| `obfuscation-analyst` | VMProtect, Themida, OLLVM analysis and unpacking |
-| `windows-internals-agent` | EPROCESS, PEB/TEB, system calls, object manager |
-| `ida-specialist` | IDA Pro scripting, plugins, FLIRT, type libraries |
-| `ghidra-specialist` | Ghidra scripting, P-code, extensions |
-| `dma-specialist` | DMA/FPGA memory access (PCILeech, Screamer) |
+| Agent                                                                                       | Description                                                                  |
+| ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `reverse-engineer`                                                                          | Disassembly analysis, struct recovery, offset hunting, binary patching       |
+| `exploit-developer`                                                                         | Kernel exploits, BYOVD chains, EFI persistence, privilege escalation         |
+| `anti-cheat-analyst`                                                                        | BattlEye, EAC, Vanguard, VAC, FACEIT internals and bypass research           |
+| `malware-analyst`                                                                           | Cheat binary analysis, unpacking, IOC extraction, technique classification   |
+| `cheat-developer`                                                                           | ESP, aimbot, triggerbot, overlay rendering, UE/Unity/Source engine internals |
+| `driver-developer`                                                                          | WDM/KMDF drivers, IOCTL comm, memory R/W, stealth loading                    |
+| `hypervisor-researcher`                                                                     | Intel VMX, AMD SVM, EPT/NPT hooks, HV-based memory access                    |
+| `android-researcher`                                                                        | Zygisk, KernelSU, frida, IL2CPP dumping, native hooking                      |
+| `network-analyst`                                                                           | Game protocol RE, packet capture, MITM proxy, server emulation               |
+| `cs2-specialist`                                                                            | Counter-Strike 2 / Source 2 internals                                        |
+| `valorant-specialist`                                                                       | Valorant / UE4 fork / Vanguard interaction                                   |
+| `fortnite-specialist`                                                                       | Fortnite / UE5 / EAC interaction                                             |
+| `apex-specialist`                                                                           | Apex Legends / Source fork internals                                         |
+| `unreal-engine-specialist`                                                                  | UE4/UE5 GObjects, GNames, ProcessEvent, SDK gen                              |
+| `unity-specialist`                                                                          | Unity Mono/IL2CPP, GameObjectManager, metadata                               |
+| `source-engine-specialist`                                                                  | Source 1/2 ConVar, NetVar, ClientClass                                       |
+| `injection-specialist`                                                                      | All injection methods (manual map, reflective, APC, EFI)                     |
+| `hooking-specialist`                                                                        | All hook types (VMT, IAT, inline, EPT, syscall)                              |
+| `obfuscation-analyst`                                                                       | VMProtect, Themida, OLLVM analysis and unpacking                             |
+| `windows-internals-agent`                                                                   | EPROCESS, PEB/TEB, system calls, object manager                              |
+| `ida-specialist`                                                                            | IDA Pro scripting, plugins, FLIRT, type libraries                            |
+| `ghidra-specialist`                                                                         | Ghidra scripting, P-code, extensions                                         |
+| `dma-specialist`                                                                            | DMA/FPGA memory access (PCILeech, Screamer)                                  |
 | ...and 52 more game-specific, engine-specific, technique-specific, and tool-specific agents |
 
 ### Subagents (161)
 
-| Subagent | Purpose |
-|----------|---------|
-| `offset-finder` | Cross-reference game offsets across 3,900+ archived sources |
-| `code-analyzer` | Classify technique, hook method, stealth measures |
-| `pattern-scanner` | Generate and validate IDA-style byte patterns |
-| `detection-assessor` | Assess detection risk per anti-cheat system |
-| `vulnerability-scanner` | Find exploitable vulns in drivers and binaries |
-| `struct-recovery` | Recover C++ structures from memory dumps or IDA |
-| `binary-differ` | Diff game updates to track offset changes |
-| `source-grep` | Deep search across all 3,985 source archives |
-| `hook-planner` | Plan hook chains for specific objectives |
-| `import-resolver` | Resolve imports for manual-mapped modules |
-| `vtable-mapper` | Map virtual function tables |
-| `syscall-stub-generator` | Generate direct/indirect syscall stubs |
-| `bone-mapper` | Map skeleton bone indices per game |
-| `ac-driver-analyzer` | Deep analysis of anti-cheat kernel driver |
-| `stack-spoofer` | Spoof call stack for AC evasion |
-| `shellcode-encoder` | Encode shellcode to evade signatures |
+| Subagent                                               | Purpose                                                     |
+| ------------------------------------------------------ | ----------------------------------------------------------- |
+| `offset-finder`                                        | Cross-reference game offsets across 3,900+ archived sources |
+| `code-analyzer`                                        | Classify technique, hook method, stealth measures           |
+| `pattern-scanner`                                      | Generate and validate IDA-style byte patterns               |
+| `detection-assessor`                                   | Assess detection risk per anti-cheat system                 |
+| `vulnerability-scanner`                                | Find exploitable vulns in drivers and binaries              |
+| `struct-recovery`                                      | Recover C++ structures from memory dumps or IDA             |
+| `binary-differ`                                        | Diff game updates to track offset changes                   |
+| `source-grep`                                          | Deep search across all 3,985 source archives                |
+| `hook-planner`                                         | Plan hook chains for specific objectives                    |
+| `import-resolver`                                      | Resolve imports for manual-mapped modules                   |
+| `vtable-mapper`                                        | Map virtual function tables                                 |
+| `syscall-stub-generator`                               | Generate direct/indirect syscall stubs                      |
+| `bone-mapper`                                          | Map skeleton bone indices per game                          |
+| `ac-driver-analyzer`                                   | Deep analysis of anti-cheat kernel driver                   |
+| `stack-spoofer`                                        | Spoof call stack for AC evasion                             |
+| `shellcode-encoder`                                    | Encode shellcode to evade signatures                        |
 | ...and 145 more focused subagents across 16 categories |
 
 ### Plugins (114)
 
-| Plugin | Purpose |
-|--------|---------|
-| `game-offset-db` | Cross-reference offset database for 60+ games |
-| `technique-finder` | Find implementation examples across all source code |
-| `yara-generator` | Generate YARA detection rules from cheat patterns |
-| `driver-catalog` | Vulnerable driver database with exploit primitives |
-| `hook-library` | All hook types with code examples and detection vectors |
-| `struct-database` | Known game engine structures (UE4/UE5, Source, Unity) |
-| `anti-cheat-timeline` | AC update tracking and bypass shelf-life |
-| `exploit-chain-builder` | Compose multi-stage exploit chains |
-| `signature-generator` | Generate and validate byte patterns |
-| `cs2-offsets` / `valorant-offsets` / ... | Per-game offset databases (10 games) |
-| `ue4-sdk-reference` / `ue5-sdk-reference` | Engine SDK structure references |
-| `ntapi-reference` | Undocumented NT API reference |
-| `syscall-table` | Windows syscall numbers per OS build |
-| `battleye-detection-db` / `eac-detection-db` / ... | Per-AC detection databases |
-| `offset-header-generator` / `hook-template-generator` | Code generation tools |
+| Plugin                                                                           | Purpose                                                 |
+| -------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| `game-offset-db`                                                                 | Cross-reference offset database for 60+ games           |
+| `technique-finder`                                                               | Find implementation examples across all source code     |
+| `yara-generator`                                                                 | Generate YARA detection rules from cheat patterns       |
+| `driver-catalog`                                                                 | Vulnerable driver database with exploit primitives      |
+| `hook-library`                                                                   | All hook types with code examples and detection vectors |
+| `struct-database`                                                                | Known game engine structures (UE4/UE5, Source, Unity)   |
+| `anti-cheat-timeline`                                                            | AC update tracking and bypass shelf-life                |
+| `exploit-chain-builder`                                                          | Compose multi-stage exploit chains                      |
+| `signature-generator`                                                            | Generate and validate byte patterns                     |
+| `cs2-offsets` / `valorant-offsets` / ...                                         | Per-game offset databases (10 games)                    |
+| `ue4-sdk-reference` / `ue5-sdk-reference`                                        | Engine SDK structure references                         |
+| `ntapi-reference`                                                                | Undocumented NT API reference                           |
+| `syscall-table`                                                                  | Windows syscall numbers per OS build                    |
+| `battleye-detection-db` / `eac-detection-db` / ...                               | Per-AC detection databases                              |
+| `offset-header-generator` / `hook-template-generator`                            | Code generation tools                                   |
 | ...and 99 more data, reference, and code generation plugins across 11 categories |
 
 ### Prompts (148)
 
-| Prompt | Purpose |
-|--------|---------|
-| `analyze-cheat` | Full architecture analysis of a cheat project |
-| `find-bypass` | Find bypass techniques for specific anti-cheat |
-| `build-cheat` / `build-esp` / `build-aimbot` | Design cheat systems |
-| `reverse-binary` / `reverse-unity-game` / `reverse-unreal-game` | RE workflows |
-| `write-driver` / `write-injector` / `write-hook` | Implementation guides |
-| `bypass-battleye` / `bypass-eac` / `bypass-vanguard` | AC bypass strategies |
-| `spoof-hardware` | HWID spoofing design |
-| `analyze-update` | Game update offset migration |
-| `exploit-vuln-driver` / `exploit-kernel-bug` | Exploitation guides |
-| `implement-backtrack` / `implement-autowall` / `implement-prediction` | Feature implementation |
+| Prompt                                                                   | Purpose                                        |
+| ------------------------------------------------------------------------ | ---------------------------------------------- |
+| `analyze-cheat`                                                          | Full architecture analysis of a cheat project  |
+| `find-bypass`                                                            | Find bypass techniques for specific anti-cheat |
+| `build-cheat` / `build-esp` / `build-aimbot`                             | Design cheat systems                           |
+| `reverse-binary` / `reverse-unity-game` / `reverse-unreal-game`          | RE workflows                                   |
+| `write-driver` / `write-injector` / `write-hook`                         | Implementation guides                          |
+| `bypass-battleye` / `bypass-eac` / `bypass-vanguard`                     | AC bypass strategies                           |
+| `spoof-hardware`                                                         | HWID spoofing design                           |
+| `analyze-update`                                                         | Game update offset migration                   |
+| `exploit-vuln-driver` / `exploit-kernel-bug`                             | Exploitation guides                            |
+| `implement-backtrack` / `implement-autowall` / `implement-prediction`    | Feature implementation                         |
 | ...and 138 more prompts across 14 categories for every game hacking task |
 
 ---
@@ -108,30 +108,30 @@ MCP (Model Context Protocol) server for game hacking & reverse engineering. A st
 
 ### Workflow Tools
 
-| Tool | Description |
-|------|------------|
-| `research_technique` | End-to-end technique research with scored keyword ranking |
-| `analyze_project` | Full project analysis (SKILL.md + source code) |
+| Tool                 | Description                                                |
+| -------------------- | ---------------------------------------------------------- |
+| `research_technique` | End-to-end technique research with scored keyword ranking  |
+| `analyze_project`    | Full project analysis (SKILL.md + source code)             |
 | `get_agent_briefing` | Load agent definition with available subagents and plugins |
 
 ### Skill Tools
 
-| Tool | Description |
-|------|------------|
-| `list_skills` | List/filter skills by name or type |
-| `read_skill` | Read a skill SKILL.md |
-| `read_source` | Read source code with pagination (50KB chunks) |
+| Tool            | Description                                                    |
+| --------------- | -------------------------------------------------------------- |
+| `list_skills`   | List/filter skills by name or type                             |
+| `read_skill`    | Read a skill SKILL.md                                          |
+| `read_source`   | Read source code with pagination (50KB chunks)                 |
 | `search_skills` | Multi-keyword scored search across names, descriptions, topics |
-| `skill_stats` | Library statistics |
+| `skill_stats`   | Library statistics                                             |
 
 ### Component Tools
 
-| Tool | Description |
-|------|------------|
-| `list_agents` / `read_agent` | Browse and read agent definitions |
+| Tool                               | Description                          |
+| ---------------------------------- | ------------------------------------ |
+| `list_agents` / `read_agent`       | Browse and read agent definitions    |
 | `list_subagents` / `read_subagent` | Browse and read subagent definitions |
-| `list_plugins` / `read_plugin` | Browse and read plugin definitions |
-| `list_prompts` / `read_prompt` | Browse and read prompt templates |
+| `list_plugins` / `read_plugin`     | Browse and read plugin definitions   |
+| `list_prompts` / `read_prompt`     | Browse and read prompt templates     |
 
 ---
 
@@ -296,15 +296,15 @@ mcp-gamehacking/
 
 ### Hand-Written (177)
 
-| Category | Examples |
-|----------|---------|
-| Kernel / Drivers | kernel-cr3-physmem, kernel-hooks-ssdt, vulnerable-driver-exploits |
-| Injection | reflective-dll, pe-injection-remote, early-bird-apc, threadpool-wait |
-| Anti-Cheat | vanguard (15+ vgk-* skills), battleye, eac, patchguard, hvci |
-| Game Engines | unreal-object-model, source-netvars, world-to-screen, present-hook |
-| Obfuscation | fix-vmp-themida-ollvm, control-flow-flattening, mixed-boolean-arithmetic |
-| UEFI / EFI | efi-driver-bootkit, vgk-secure-boot-spoof |
-| DMA | dma, iommu, iommu-state-verification |
+| Category         | Examples                                                                 |
+| ---------------- | ------------------------------------------------------------------------ |
+| Kernel / Drivers | kernel-cr3-physmem, kernel-hooks-ssdt, vulnerable-driver-exploits        |
+| Injection        | reflective-dll, pe-injection-remote, early-bird-apc, threadpool-wait     |
+| Anti-Cheat       | vanguard (15+ vgk-* skills), battleye, eac, patchguard, hvci             |
+| Game Engines     | unreal-object-model, source-netvars, world-to-screen, present-hook       |
+| Obfuscation      | fix-vmp-themida-ollvm, control-flow-flattening, mixed-boolean-arithmetic |
+| UEFI / EFI       | efi-driver-bootkit, vgk-secure-boot-spoof                                |
+| DMA              | dma, iommu, iommu-state-verification                                     |
 
 ### Archived Projects (3,985)
 

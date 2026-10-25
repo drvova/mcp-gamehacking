@@ -13,7 +13,6 @@ metadata:
   games: [cs2]
   engines: [source2]
 ---
-
 Detailed content here...
 ```
 

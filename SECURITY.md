@@ -15,8 +15,8 @@ We actively maintain and provide security updates for the latest code on the `ma
 
 **mcp-gamehacking** is a tool designed exclusively for security research, reverse engineering education, software analysis, and the development of defensive mechanisms (anti-cheat systems).
 
-* **Legal Use:** Reverse engineering tools and process memory management should only be used against software you own or applications where you have **explicit written permission** to conduct security testing (e.g., authorized penetration testing or bug bounty programs).
-* **Liability:** The maintainers assume no liability and are not responsible for any misuse, account bans, terms of service breaches, or legal consequences resulting from unauthorized use of this software.
+- **Legal Use:** Reverse engineering tools and process memory management should only be used against software you own or applications where you have **explicit written permission** to conduct security testing (e.g., authorized penetration testing or bug bounty programs).
+- **Liability:** The maintainers assume no liability and are not responsible for any misuse, account bans, terms of service breaches, or legal consequences resulting from unauthorized use of this software.
 
 ---
 
@@ -25,17 +25,21 @@ We actively maintain and provide security updates for the latest code on the `ma
 We take the security of the `mcp-gamehacking` project seriously — including the MCP server codebase, system tools, and knowledge base assets processed by AI agents.
 
 ### What to Report:
-* Vulnerabilities within the MCP server implementation (e.g., arbitrary code execution, path traversal when reading knowledge bases, insecure IPC/RPC calls, or prompt/tool injection risks).
-* Unintentional leaks of sensitive credentials, tokens, or private data within the repository.
+
+- Vulnerabilities within the MCP server implementation (e.g., arbitrary code execution, path traversal when reading knowledge bases, insecure IPC/RPC calls, or prompt/tool injection risks).
+- Unintentional leaks of sensitive credentials, tokens, or private data within the repository.
 
 ### How to Report:
+
 Please **do not open public GitHub Issues** to report security vulnerabilities.
 
 Instead, submit your report confidentially via:
-* **GitHub Private Vulnerability Reporting:** Go to the repository's *Security* tab -> *Advisories* -> *Report a vulnerability*.
-* Alternatively, reach out directly to the maintainers listed on the repository profile.
+
+- **GitHub Private Vulnerability Reporting:** Go to the repository's _Security_ tab -> _Advisories_ -> _Report a vulnerability_.
+- Alternatively, reach out directly to the maintainers listed on the repository profile.
 
 ### Resolution Process:
+
 1. **Acknowledgment:** We will acknowledge receipt of your vulnerability report within **48 hours**.
 2. **Investigation:** We will evaluate the report, verify the issue, and determine its impact.
 3. **Remediation:** A patch will be created and released promptly. Responsible disclosure credits will be attributed in the Release Notes if desired.
