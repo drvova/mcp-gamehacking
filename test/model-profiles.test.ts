@@ -1431,3 +1431,106 @@ describe("chains", () => {
     }
   });
 });
+
+describe("the catalogue is a catalogue, not a list of names", () => {
+  // The model has to build against these tools. Publishing names without their
+  // arguments made writing `args`, `constrain` or a chain's `extract` guesswork
+  // until a refusal taught you the names.
+  it("shows every tool's arguments where the tool is listed", async () => {
+    const session = await openSession();
+    try {
+      const report = textOf(await session.request(toolCall(1, "surface")));
+
+      // read_agent takes exactly one argument, and it must be visible without a
+      // second call or a failed one.
+      expect(report).toMatch(/`read_agent` \(name: string\)/);
+      expect(report).toMatch(/`read_skill` \(name: string\)/);
+
+      // Optional arguments are marked, and their defaults shown.
+      expect(report).toMatch(/limit\?: number=20/);
+      expect(report).toMatch(/`skill_stats` \(no arguments\)/);
+    } finally {
+      session.close();
+    }
+  });
+
+  it("explains one tool in full on request", async () => {
+    const session = await openSession();
+    try {
+      const detail = textOf(
+        await session.request(toolCall(1, "surface", { detail: "read_agent" })),
+      );
+
+      expect(detail).toContain("# read_agent");
+      expect(detail).toContain("## Arguments");
+      expect(detail).toMatch(/`name` \(string, required\)/);
+      // A worked example beats a schema: it shows how the tool is carried.
+      expect(detail).toContain("## Carrying it");
+      expect(detail).toContain('tool: "read_agent"');
+    } finally {
+      session.close();
+    }
+  });
+
+  it("says so plainly when asked about a tool that does not exist", async () => {
+    const session = await openSession();
+    try {
+      const detail = textOf(
+        await session.request(toolCall(1, "surface", { detail: "no_such_tool" })),
+      );
+
+      expect(detail).toMatch(/No tool named/);
+      expect(detail).toContain("read_agent");
+    } finally {
+      session.close();
+    }
+  });
+
+  it("publishes a shape that can actually be built against", async () => {
+    const session = await openSession();
+    try {
+      const detail = textOf(
+        await session.request(toolCall(1, "surface", { detail: "search_skills" })),
+      );
+
+      // Every argument the detail view names must be accepted by `pick`, or the
+      // catalogue is describing a tool that does not exist.
+      const named = [...detail.matchAll(/^- `([a-z_]+)` \(/gm)].map((match) => match[1]);
+      expect(named.length).toBeGreaterThan(0);
+
+      const composed = await session.request(
+        toolCall(2, "surface", {
+          pick: [
+            {
+              tool: "search_skills",
+              as: "mine",
+              args: Object.fromEntries(named.map((name) => [name, "kdmapper"])),
+              defaults: {},
+              constrain: {},
+            },
+          ],
+        }),
+      );
+
+      // `args` for every published name, so nothing the catalogue advertised is
+      // rejected as unknown.
+      expect(wasRefused(composed)).toBe(false);
+    } finally {
+      session.close();
+    }
+  });
+
+  it("says what a tool takes in the delta, since that is the decision input", async () => {
+    const session = await openSession();
+    try {
+      const report = textOf(await session.request(toolCall(1, "surface")));
+
+      // Choosing what to carry needs the arguments; a bare name forces a second
+      // call before the model can even decide.
+      expect(report).toMatch(/`find_offset` \(query: string, max_results\?: number=15\)/);
+      expect(report).toContain('detail: "<tool>"');
+    } finally {
+      session.close();
+    }
+  });
+});

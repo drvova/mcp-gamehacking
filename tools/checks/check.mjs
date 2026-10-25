@@ -1805,6 +1805,81 @@ const CHECKS = {
     pass("chain");
   },
 
+  async "catalog-args"() {
+    // A model builds against these tools. Publishing names without their
+    // arguments made writing `args`, `constrain` or a chain's `extract` guesswork
+    // until a refusal taught you the names, so the shape is published where the
+    // tool is listed.
+    const session = await openSession();
+    try {
+      const report = textOf(await session.request(toolCall(1, "surface")));
+
+      // Required and optional must be distinguishable, or a model cannot tell
+      // what it has to supply.
+      assert(
+        /`read_agent` \(name: string\)/.test(report),
+        "a required argument is not published beside its tool",
+      );
+      assert(
+        /limit\?: number=20/.test(report),
+        "an optional argument's name, type or default is not published",
+      );
+      assert(
+        /`skill_stats` \(no arguments\)/.test(report),
+        "a tool with no arguments does not say so",
+      );
+
+      // The detail view must explain one tool completely.
+      const detail = textOf(
+        await session.request(toolCall(2, "surface", { detail: "search_skills" })),
+      );
+      assert(detail.includes("# search_skills"), "detail did not name the tool");
+      assert(/## Arguments/.test(detail), "detail did not list arguments");
+      assert(
+        /`query` \(string, required[^)]*\)/.test(detail),
+        "detail lost required-ness, or the constraints the tool already declares",
+      );
+      assert(/## Carrying it/.test(detail), "detail gave no worked example");
+
+      // The published shape must be buildable. Every argument the detail view
+      // names has to be accepted, or the catalogue describes a tool that does
+      // not exist.
+      const named = [...detail.matchAll(/^- `([a-z_]+)` \(/gm)].map((match) => match[1]);
+      assert(named.length > 0, "detail published no argument names to check");
+
+      const composed = await session.request(
+        toolCall(3, "surface", {
+          pick: [
+            {
+              tool: "search_skills",
+              as: "published",
+              args: Object.fromEntries(named.map((name) => [name, "kdmapper"])),
+            },
+          ],
+        }),
+      );
+      assert(
+        !composed?.result?.isError,
+        `a shape the catalogue published was rejected: ${textOf(composed).slice(0, 200)}`,
+      );
+
+      // And the example in the detail view must be usable as written.
+      const carrying = /surface \{ pick: \[\{ tool: "([^"]+)", as: "([^"]+)"/.exec(detail);
+      assert(carrying !== null, "the detail view gave no parseable example");
+      assert(carrying[1] === "search_skills", `the example names the wrong tool: ${carrying[1]}`);
+
+      // A tool that does not exist is answered plainly, not with an empty page.
+      const missing = textOf(
+        await session.request(toolCall(4, "surface", { detail: "no_such_tool" })),
+      );
+      assert(/No tool named/.test(missing), "an unknown tool was not reported");
+      assert(missing.includes("read_agent"), "the answer did not say what does exist");
+    } finally {
+      session.close();
+    }
+    pass("catalog-args");
+  },
+
   ledger: checkLedger,
 };
 

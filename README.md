@@ -153,8 +153,25 @@ surface          the only tool you begin with
 ```
 
 Called with no arguments it reports where you are and lists **every registered
-tool**, each with its description, plus the delta between what you carry and
-what you do not. Then:
+tool with its arguments** — required and optional, types, defaults — plus the
+delta between what you carry and what you do not. A model deciding what to pick
+needs to know what each tool takes; a list of bare names forces a second call
+before it can even decide.
+
+```
+- `read_agent` (name: string) — Read a agent's full definition and system prompt.
+- `search_skills` (query: string, has_source?: boolean, limit?: number=20) — Scored keyword search...
+- `skill_stats` (no arguments) — Library statistics from the in-memory index.
+```
+
+`surface` with `detail: "<tool>"` explains one tool completely — every argument
+with what it accepts, and a worked example of carrying it:
+
+```
+surface { detail: "read_agent" }
+```
+
+Then:
 
 ```
 surface { pick: [...] }               build your own surface, this session

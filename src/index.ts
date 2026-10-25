@@ -2576,6 +2576,117 @@ async function renderSurfaces(activeId: string): Promise<string> {
   );
 }
 
+/**
+ * A tool's arguments, written short enough to sit beside its name.
+ *
+ * The catalogue used to list names and descriptions only, which meant writing
+ * `args`, `constrain` or a chain's `extract` was guesswork until a refusal
+ * taught you the argument names. A model building its own tooling needs to see
+ * what it is building against, so the shape is published where the tool is.
+ */
+function summariseArgs(schema: Record<string, unknown> | undefined): string {
+  const properties = schema?.properties;
+  if (properties === undefined || properties === null || typeof properties !== "object") return "";
+
+  const required = new Set(
+    Array.isArray(schema?.required)
+      ? (schema.required as unknown[]).filter((key): key is string => typeof key === "string")
+      : [],
+  );
+
+  const parts = Object.entries(properties as Record<string, Record<string, unknown>>).map(
+    ([name, definition]) => {
+      const type = typeof definition?.type === "string" ? definition.type : "any";
+      const optional = required.has(name) ? "" : "?";
+      const preset = definition?.default;
+      const shown = preset === undefined ? "" : `=${JSON.stringify(preset)}`;
+      return `${name}${optional}: ${type}${shown}`;
+    },
+  );
+
+  return parts.length === 0 ? " (no arguments)" : ` (${parts.join(", ")})`;
+}
+
+/** One argument explained, for the detail view. */
+function describeArgument(
+  name: string,
+  definition: Record<string, unknown>,
+  required: boolean,
+): string {
+  const type = typeof definition?.type === "string" ? definition.type : "any";
+  const bits = [type, required ? "required" : "optional"];
+
+  const preset = definition?.default;
+  if (preset !== undefined) bits.push(`default ${JSON.stringify(preset)}`);
+  if (Array.isArray(definition?.enum)) {
+    bits.push(`one of ${(definition.enum as unknown[]).map((v) => JSON.stringify(v)).join(", ")}`);
+  }
+  if (typeof definition?.minimum === "number") bits.push(`min ${definition.minimum}`);
+  if (typeof definition?.maximum === "number") bits.push(`max ${definition.maximum}`);
+  if (typeof definition?.minLength === "number") bits.push(`minLength ${definition.minLength}`);
+  if (typeof definition?.maxLength === "number") bits.push(`maxLength ${definition.maxLength}`);
+
+  const text = typeof definition?.description === "string" ? ` — ${definition.description}` : "";
+  return `- \`${name}\` (${bits.join(", ")})${text}`;
+}
+
+/**
+ * Everything known about one tool, so a model can build against it without
+ * discovering its shape by being refused.
+ */
+async function renderToolDetail(name: string): Promise<string> {
+  const all = await listRegisteredTools();
+  const tool = all.find((candidate) => candidate.name === name);
+  if (tool === undefined) {
+    const names = all.map((candidate) => candidate.name).join(", ");
+    return `No tool named \`${name}\`. Registered: ${names}`;
+  }
+
+  const schema = tool.inputSchema;
+  const properties = schema?.properties;
+  const required = new Set(
+    Array.isArray(schema?.required)
+      ? (schema.required as unknown[]).filter((key): key is string => typeof key === "string")
+      : [],
+  );
+
+  const lines = [`# ${name}`, "", tool.description ?? "(no description)", ""];
+
+  if (properties === undefined || properties === null || typeof properties !== "object") {
+    lines.push("## Arguments", "", "This tool takes no arguments.");
+  } else {
+    const entries = Object.entries(properties as Record<string, Record<string, unknown>>);
+    lines.push(
+      "## Arguments",
+      "",
+      entries.length === 0
+        ? "This tool takes no arguments."
+        : entries
+            .map(([key, definition]) => describeArgument(key, definition, required.has(key)))
+            .join("\n"),
+    );
+  }
+
+  // A worked example beats a schema: it shows how this tool is carried, not just
+  // what it accepts.
+  const first = Object.keys((properties ?? {}) as Record<string, unknown>)[0];
+  lines.push(
+    "",
+    "## Carrying it",
+    "",
+    "```",
+    first === undefined
+      ? `surface { pick: [{ tool: "${name}", as: "mine" }] }`
+      : `surface { pick: [{ tool: "${name}", as: "mine", args: { ${first}: ... } }] }`,
+    "```",
+    "",
+    "Omit `as` to redefine the tool under its own name. Add `defaults`, `constrain`,",
+    "`output` or `then` to shape how it is called, what it returns, or what runs after it.",
+  );
+
+  return lines.join("\n");
+}
+
 /** Every registered tool, marking what the active surface carries. */
 async function renderCatalogue(profile: ModelProfile, core: readonly string[]): Promise<string> {
   const all = await listRegisteredTools();
@@ -2584,7 +2695,11 @@ async function renderCatalogue(profile: ModelProfile, core: readonly string[]): 
   const carried = new Set(shapeTools(all, profile, core).map((tool) => tool.name));
   const render = (tools: ToolListResult["tools"]) =>
     tools
-      .map((tool) => `- \`${tool.name}\`${tool.description ? ` — ${tool.description}` : ""}`)
+      .map(
+        (tool) =>
+          `- \`${tool.name}\`${summariseArgs(tool.inputSchema)}` +
+          `${tool.description ? ` — ${tool.description}` : ""}`,
+      )
       .join("\n");
 
   const inside = all.filter((tool) => carried.has(tool.name));
@@ -2600,7 +2715,8 @@ async function renderCatalogue(profile: ModelProfile, core: readonly string[]): 
     `# Tool catalogue (${all.length} registered)\n\n` +
     `\`${profile.id}\` carries ${inside.length} of them.\n\n` +
     `## Carried by \`${profile.id}\` (${inside.length})\n${render(inside)}${rest}\n\n` +
-    "Build your working set from these with `surface` and `pick`, then keep it with `save`."
+    "Build your working set from these with `surface` and `pick`, then keep it with `save`." +
+    '\n\n`surface` with `detail: "<tool>"` explains one tool in full — every argument, what it accepts, and how to carry it.'
   );
 }
 
@@ -2623,20 +2739,28 @@ async function renderSurface(
   const all = await listRegisteredTools();
   const carried = shapeTools(all, profile, core).map((tool) => tool.name);
   const carriedSet = new Set(carried);
-  const rest = all.map((tool) => tool.name).filter((name) => !carriedSet.has(name));
+  const rest = all.filter((tool) => !carriedSet.has(tool.name));
 
+  // Carried tools are already in the caller's own tool list, so their schemas
+  // are in hand and repeating them here would be noise.
   const carries = carried.length
     ? `\n\n## Carried (${carried.length})\n${carried.map((name) => `\`${name}\``).join(", ")}`
     : "";
 
-  // Show the delta between this surface and the catalogue. It is empty when the
-  // surface already holds everything, and it is exactly the decision input when
-  // it does not — which is the case that matters, since choosing is the point.
+  // The delta is the decision input, so it carries the arguments too. A model
+  // deciding what to pick needs to know what each tool takes, and a list of bare
+  // names forces a second call to find out.
   const missing = rest.length
     ? `\n\n## Not carried (${rest.length})\n` +
-      `${rest.map((name) => `\`${name}\``).join(", ")}\n\n` +
-      "All of these work if you call them by name. To carry them, `pick` the set you want — " +
-      '`surface` with `list: "tools"` gives each one\'s description.'
+      rest
+        .map(
+          (tool) =>
+            `- \`${tool.name}\`${summariseArgs(tool.inputSchema)}` +
+            `${tool.description ? ` — ${tool.description}` : ""}`,
+        )
+        .join("\n") +
+      "\n\nAll of these work if you call them by name. To carry them, `pick` the set you want; " +
+      '`surface` with `detail: "<tool>"` explains one in full.'
     : "";
 
   return (
@@ -2712,7 +2836,15 @@ server.tool(
     list: z
       .enum(["tools", "surfaces"])
       .optional()
-      .describe("Every registered tool with its description, or the surfaces you have saved"),
+      .describe(
+        "Every registered tool with its arguments and description, or the surfaces you have saved",
+      ),
+    detail: z
+      .string()
+      .optional()
+      .describe(
+        "Explain one tool in full: every argument, what it accepts, and how to carry it. Use this before writing `args`, `constrain` or a chain's `extract`, instead of discovering the shape by being refused.",
+      ),
     pick: z
       .array(
         z.union([
@@ -2814,7 +2946,7 @@ server.tool(
       .optional()
       .describe("Take a surface you saved earlier, or 'auto' to clear the override"),
   },
-  async ({ list, pick, save, guidance, set }, extra) => {
+  async ({ list, detail, pick, save, guidance, set }, extra) => {
     const meta = extra?._meta;
     const clientName = server.server.getClientVersion()?.name ?? null;
     const notes: string[] = [];
@@ -2847,6 +2979,7 @@ server.tool(
       );
     }
 
+    if (detail !== undefined) return ok(await renderToolDetail(detail));
     if (list === "surfaces") return ok(await renderSurfaces(profile.id));
     if (list === "tools") return ok(await renderCatalogue(profile, core));
 
