@@ -1,2 +1,5 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# Auto detect text files and perform LF normalization.
+# `eol=lf` makes checkouts LF on every platform. The formatter (rs fmt) enforces
+# LF, so without this a Windows checkout with core.autocrlf=true would report
+# every file as unformatted.
+* text=auto eol=lf
