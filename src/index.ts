@@ -1,6 +1,6 @@
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { readdir, readFile, stat } from "fs/promises";
 import { dirname, join, resolve } from "path";
@@ -13,6 +13,7 @@ import {
   resolveProfile,
   setSessionSurface,
   shapeTools,
+  boundArgsFor,
 } from "./profiles/resolve.js";
 import { ModelProfileSchema, PROFILE_ID_MESSAGE, PROFILE_ID_PATTERN } from "./profiles/types.js";
 import type { ModelProfile } from "./profiles/types.js";
@@ -1908,27 +1909,116 @@ function installProfileAwareToolList(mcp: McpServer): boolean {
 }
 
 /**
- * Compose an ad-hoc surface from chosen tool names.
+ * Make a derived tool work when it is called.
+ *
+ * A surface that only narrowed the listing would be a lie: the caller would see
+ * a tool with two arguments and get a failure for omitting the other four. So
+ * the bound arguments are merged here, at the single point every call passes
+ * through, and the base tool is invoked with them.
+ *
+ * Bound arguments win over anything the caller sends. They left the schema, so a
+ * caller that sends one is reaching past what it was shown, and honouring that
+ * would undo the binding the model asked for.
+ */
+function installProfileAwareCall(mcp: McpServer): boolean {
+  const protocol = mcp.server as unknown as {
+    _requestHandlers?: Map<string, ToolListHandler>;
+    removeRequestHandler?: (method: string) => void;
+  };
+
+  const handlers = protocol._requestHandlers;
+  if (!(handlers instanceof Map) || typeof protocol.removeRequestHandler !== "function") {
+    return false;
+  }
+
+  const original = handlers.get("tools/call");
+  if (typeof original !== "function") return false;
+
+  protocol.removeRequestHandler("tools/call");
+  mcp.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+    // Snapshot request-scoped inputs before awaiting anything, so a later
+    // pipelined request cannot change what this one resolves to.
+    const meta = extra?._meta;
+    const clientName = mcp.server.getClientVersion()?.name ?? null;
+    const session = getSessionSurface();
+
+    const resolved = await resolveProfile(PROFILE_ROOT, { meta, clientName, session });
+    const bound = boundArgsFor(resolved.profile, request.params.name);
+    if (bound === null) return original(request, extra);
+
+    return original(
+      {
+        ...request,
+        params: {
+          ...request.params,
+          name: bound.tool,
+          arguments: { ...(request.params.arguments ?? {}), ...bound.args },
+        },
+      },
+      extra,
+    );
+  });
+
+  return true;
+}
+
+/**
+ * A tool the caller asked for: a registered name, or one of its own with
+ * arguments bound.
+ */
+type PickEntry =
+  | string
+  | {
+      tool: string;
+      as?: string;
+      args?: Record<string, unknown>;
+      description?: string;
+      argDescriptions?: Record<string, string>;
+    };
+
+/**
+ * Compose an ad-hoc surface from the caller's own choices.
  *
  * Session-scoped and never written to disk: `pick` is the fast path for "these
  * tools, now", while `save` writes it down for later sessions. Unknown names
  * are reported rather than silently dropped, so a typo does not quietly produce
  * a smaller surface than the caller asked for.
+ *
+ * An entry may bind arguments, which is how a caller builds a tool it can call
+ * without getting the call shape wrong: `{ tool: "read_source", as: "read_x",
+ * args: { name: "x" } }` lists `read_x` with `name` gone from its schema.
  */
 async function pickSurface(
-  names: string[],
+  entries: PickEntry[],
 ): Promise<{ failure: string } | { profile: ModelProfile; unknown: string[] }> {
   const all = await listRegisteredTools();
   if (all.length === 0) return { failure: "The tool catalogue is unavailable in this build." };
 
-  const available = new Set(all.map((tool) => tool.name));
-  const wanted = names.map((name) => name.trim()).filter((name) => name.length > 0);
+  // Normalise once, so the rest of the function has a single shape to reason
+  // about: a bare name is an entry with nothing bound.
+  const wanted = entries
+    .map((entry) =>
+      typeof entry === "string"
+        ? { tool: entry.trim() }
+        : {
+            tool: entry.tool.trim(),
+            alias: entry.as?.trim(),
+            args: entry.args,
+            description: entry.description,
+            argDescriptions: entry.argDescriptions,
+          },
+    )
+    .filter((entry) => entry.tool.length > 0);
+
   if (wanted.length === 0) {
     return { failure: "`pick` needs at least one tool name. Call `surface` to see the catalogue." };
   }
 
-  const unknown = wanted.filter((name) => !available.has(name));
-  const known = wanted.filter((name) => available.has(name));
+  const available = new Set(all.map((tool) => tool.name));
+  const unknown = [...new Set(wanted.map((entry) => entry.tool))].filter(
+    (name) => !available.has(name),
+  );
+  const known = wanted.filter((entry) => available.has(entry.tool));
   if (known.length === 0) {
     return {
       failure:
@@ -1937,25 +2027,40 @@ async function pickSurface(
     };
   }
 
+  const derived: ModelProfile["tools"]["derived"] = [];
+  const names: string[] = [];
+  for (const entry of known) {
+    const alias = entry.alias || entry.tool;
+    if (alias !== entry.tool || entry.args !== undefined || entry.description !== undefined) {
+      derived.push({
+        as: alias,
+        tool: entry.tool,
+        args: entry.args ?? {},
+        ...(entry.description === undefined ? {} : { description: entry.description }),
+        argDescriptions: entry.argDescriptions ?? {},
+      });
+    }
+    names.push(alias);
+  }
+
   const { manifest } = await loadSurfaces(PROFILE_ROOT);
   const profile = ModelProfileSchema.parse({
     id: manifest.pickedId,
     label: "Picked",
-    description: `Composed for this session: ${known.length} tools.`,
+    description: `Composed for this session: ${names.length} tools.`,
     guidance:
-      `You composed this surface yourself, from the catalogue, and it holds ${known.length} tools: ` +
-      `${known.join(", ")}. It is session-scoped and nothing was written to disk.\n\n` +
+      `You composed this surface yourself, from the catalogue, and it holds ${names.length} tools: ` +
+      `${names.join(", ")}. It is session-scoped and nothing was written to disk.\n\n` +
       "Recompose it with `surface` and `pick` whenever the task changes shape — a surface is a working " +
       "set, not a commitment. If it turns out to be right, `save` writes it down so later " +
       "sessions start there.",
-    tools: { include: known, order: known, exclude: [], descriptions: {} },
+    tools: { include: names, order: names, exclude: [], descriptions: {}, derived },
     workflow: [],
   });
 
   return { profile, unknown };
 }
 
-/** Apply a session surface override. Returns an error message, or null on success. */
 async function applySurface(id: string): Promise<string | null> {
   if (id === "auto") {
     setSessionSurface(null);
@@ -1997,9 +2102,14 @@ async function renderSurfaces(activeId: string): Promise<string> {
     ? `\n\nUnusable profile files:\n${invalid.map((entry) => `- ${entry.file}: ${entry.reason}`).join("\n")}`
     : "";
 
-  const wiring = PROFILES_WIRED
-    ? "Tool listing is profile-aware."
-    : "Tool listing is NOT profile-aware in this build, so every surface presents the full catalogue.";
+  const wiring = [
+    PROFILES_WIRED
+      ? "Tool listing is profile-aware."
+      : "Tool listing is NOT profile-aware in this build, so every surface presents the full catalogue.",
+    CALLS_WIRED
+      ? "Defined tools resolve when called."
+      : "Defined tools are NOT resolved when called in this build, so a bound argument would not be applied.",
+  ].join(" ");
 
   return (
     `# Surfaces (${profiles.size})\n\n${rows.join("\n")}${problems}\n\n${wiring}\n\n` +
@@ -2111,6 +2221,9 @@ async function saveSurface(
       order: tools,
       exclude: [],
       descriptions: current.tools.descriptions,
+      // A derived tool is part of what the caller built, so it is part of what
+      // is written down: recalling the surface must restore the call shapes too.
+      derived: current.tools.derived.filter((entry) => tools.includes(entry.as)),
     },
     guidance:
       guidance ??
@@ -2142,10 +2255,35 @@ server.tool(
       .optional()
       .describe("Every registered tool with its description, or the surfaces you have saved"),
     pick: z
-      .array(z.string())
+      .array(
+        z.union([
+          z.string(),
+          z.object({
+            tool: z.string().min(1).describe("The registered tool to carry"),
+            as: z
+              .string()
+              .min(1)
+              .optional()
+              .describe(
+                "Name it this instead, to keep the base tool available as well. Defaults to the tool's own name, which redefines it for you.",
+              ),
+            args: z
+              .record(z.string(), z.unknown())
+              .optional()
+              .describe(
+                "Arguments to set for you. They leave the schema, so you cannot get them wrong when you call.",
+              ),
+            description: z.string().min(1).optional().describe("Wording to use for it"),
+            argDescriptions: z
+              .record(z.string(), z.string().min(1))
+              .optional()
+              .describe("Wording for the arguments that remain, if you want them said differently"),
+          }),
+        ]),
+      )
       .optional()
       .describe(
-        "Build your own surface from these tool names, for this session. This is the path: no working set is chosen for you, here or anywhere else.",
+        "Build your own surface, for this session. A bare name carries that tool; an object carries it with arguments already set, which is how you define a tool whose call shape you cannot get wrong. This is the path: no working set is chosen for you, here or anywhere else.",
       ),
     save: z
       .string()
@@ -2211,6 +2349,7 @@ server.tool(
 );
 
 const PROFILES_WIRED = installProfileAwareToolList(server);
+const CALLS_WIRED = installProfileAwareCall(server);
 
 // ============================================================
 // MAIN

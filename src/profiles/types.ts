@@ -32,12 +32,38 @@ const MatchSchema = z.object({
 });
 
 /**
+ * A tool the model defines for itself by binding arguments of a registered one.
+ *
+ * The point is the call shape, not the capability. A tool a model must call with
+ * six correct arguments is a different tool from the same one with four of them
+ * already set, and if models do not perform equally then the call shape is
+ * exactly where a weaker one fails. Binding removes the decision.
+ */
+const DerivedToolSchema = z.object({
+  /** The name this derived tool answers to. */
+  as: z.string().min(1),
+  /** The registered tool it wraps. */
+  tool: z.string().min(1),
+  /**
+   * Arguments fixed for this tool. They are removed from the schema, not merely
+   * ignored at call time: an argument the caller can still see is one the caller
+   * can still get wrong.
+   */
+  args: z.record(z.string(), z.unknown()).default({}),
+  /** Wording to use instead of the base tool's description. */
+  description: z.string().min(1).optional(),
+  /** Per-argument wording for the arguments that remain. */
+  argDescriptions: z.record(z.string(), z.string().min(1)).default({}),
+});
+
+/**
  * How a profile presents the tool surface.
  *
  * A profile owns its surface rather than filtering a shared one: it decides
- * which tools it carries, in what order, and — via `descriptions` — how each
- * one is worded for the model that reads it. Two models that both need
- * `read_source` may need to be told about it in different terms.
+ * which tools it carries, in what order, how each one is worded for the model
+ * that reads it, and — via `derived` — which arguments are already set on them.
+ * Two models that both need `read_source` may need to be told about it in
+ * different terms, and may need it callable with different amounts of ceremony.
  *
  * This shapes `tools/list` only: a tool omitted here remains callable, so a
  * wrong profile can never disable a capability.
@@ -54,6 +80,8 @@ const ToolsSchema = z.object({
    * wording written for it instead of the server's generic one.
    */
   descriptions: z.record(z.string(), z.string().min(1)).default({}),
+  /** Tools the model defines for itself by binding arguments of registered ones. */
+  derived: z.array(DerivedToolSchema).default([]),
 });
 
 export const ModelProfileSchema = z.object({
@@ -64,7 +92,7 @@ export const ModelProfileSchema = z.object({
   label: z.string().min(1),
   description: z.string().min(1),
   match: MatchSchema.default({ clientNames: [], models: [] }),
-  tools: ToolsSchema.default({ order: [], exclude: [], descriptions: {} }),
+  tools: ToolsSchema.default({ order: [], exclude: [], descriptions: {}, derived: [] }),
   /** Model-specific operating guidance returned by get_model_profile. */
   guidance: z.string().min(80),
   /** Ordered working steps for this model. */

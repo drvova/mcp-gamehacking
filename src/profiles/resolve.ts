@@ -138,10 +138,80 @@ export async function resolveProfile(
 }
 
 /** The minimum a tool needs to expose for shaping. */
-export type ShapeableTool = { name: string; description?: string };
+export type ShapeableTool = {
+  name: string;
+  description?: string;
+  inputSchema?: Record<string, unknown>;
+};
 
 /**
- * Apply a profile to the registered tools: select, order, and re-word.
+ * The arguments a derived tool fixes, if `name` is one of them.
+ *
+ * The call path needs the same answer the listing gave, which is what keeps the
+ * two views of a surface in agreement: an alias is callable exactly while the
+ * active surface declares it.
+ */
+export function boundArgsFor(
+  profile: ModelProfile,
+  name: string,
+): { tool: string; args: Record<string, unknown> } | null {
+  const entry = profile.tools.derived.find((candidate) => candidate.as === name);
+  if (entry === undefined) return null;
+  return { tool: entry.tool, args: entry.args };
+}
+
+/**
+ * Remove bound arguments from a tool's schema and re-word what is left.
+ *
+ * A fixed argument has to leave the schema rather than be quietly overridden at
+ * call time: an argument the caller can still see is one the caller can still
+ * get wrong, and removing the decision is the entire point of binding it.
+ */
+function narrowSchema(
+  schema: Record<string, unknown> | undefined,
+  bound: Record<string, unknown>,
+  argDescriptions: Record<string, string>,
+): Record<string, unknown> | undefined {
+  if (schema === undefined || typeof schema !== "object") return schema;
+
+  const properties = schema.properties;
+  if (properties === undefined || typeof properties !== "object" || properties === null) {
+    return schema;
+  }
+
+  const kept: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(properties as Record<string, unknown>)) {
+    if (key in bound) continue;
+    const override = argDescriptions[key];
+    kept[key] =
+      override !== undefined && value !== null && typeof value === "object"
+        ? { ...(value as Record<string, unknown>), description: override }
+        : value;
+  }
+
+  const narrowed: Record<string, unknown> = { ...schema, properties: kept };
+  if (Array.isArray(schema.required)) {
+    narrowed.required = schema.required.filter((key) => typeof key === "string" && !(key in bound));
+  }
+  return narrowed;
+}
+
+/** Say what a derived tool fixed, so the caller knows what it can omit. */
+function describeDerived(
+  base: ShapeableTool,
+  entry: ModelProfile["tools"]["derived"][number],
+): string {
+  const lead = base.description ?? base.name;
+  const fixed = Object.entries(entry.args);
+  if (fixed.length === 0) return lead;
+
+  const shown = fixed.map(([key, value]) => `${key}=${JSON.stringify(value)}`).join(", ");
+  const pronoun = fixed.length === 1 ? "it" : "them";
+  return `${lead}\n\nAlready set for you: ${shown}. Omit ${pronoun} when you call.`;
+}
+
+/**
+ * Apply a profile to the registered tools: select, order, re-word, and define.
  *
  * Names the profile mentions but that no longer exist are ignored, and a
  * profile whose `include` list matches nothing falls back to the full set: a
@@ -152,8 +222,13 @@ export function shapeTools<T extends ShapeableTool>(
   profile: ModelProfile,
   surfaceCore: readonly string[],
 ): T[] {
-  const available = new Set(tools.map((tool) => tool.name));
-  const { include, exclude, order, descriptions } = profile.tools;
+  const { include, exclude, order, descriptions, derived } = profile.tools;
+  const byName = new Map(tools.map((tool) => [tool.name, tool]));
+  const aliasOf = new Set(derived.map((entry) => entry.as));
+
+  // An alias is a name a profile may carry even though nothing registered it, so
+  // it counts as available when the include and order lists are resolved.
+  const available = new Set([...byName.keys(), ...aliasOf]);
 
   // The surface core is enforced here rather than trusted to each profile,
   // because this is the single chokepoint every profile passes through: shipped,
@@ -173,6 +248,31 @@ export function shapeTools<T extends ShapeableTool>(
   const filtered = shaped.filter((tool) => !excluded.has(tool.name));
   const selected = filtered.length > 0 ? filtered : tools;
 
+  const merged = new Map<string, T>();
+  for (const tool of selected) {
+    const override = descriptions[tool.name];
+    merged.set(tool.name, override === undefined ? tool : { ...tool, description: override });
+  }
+
+  // Define the tools this model asked for. A derived entry may wrap a tool the
+  // surface does not otherwise carry, and an alias equal to its own base name
+  // replaces that base rather than appearing twice.
+  for (const entry of derived) {
+    const base = byName.get(entry.tool);
+    if (base === undefined) continue;
+    if (excluded.has(entry.as)) continue;
+    if (include && include.length > 0 && !include.includes(entry.as) && !core.has(entry.as)) {
+      continue;
+    }
+    const override = descriptions[entry.as] ?? entry.description;
+    merged.set(entry.as, {
+      ...base,
+      name: entry.as,
+      description: override ?? describeDerived(base, entry),
+      inputSchema: narrowSchema(base.inputSchema, entry.args, entry.argDescriptions),
+    });
+  }
+
   // Rank: an explicit `order` wins for the tools it names; otherwise the
   // `include` list's own order is the author's declared preference; otherwise
   // registration order, which the stable sort below preserves.
@@ -186,15 +286,9 @@ export function shapeTools<T extends ShapeableTool>(
     return [2, 0];
   };
 
-  const ranked = [...selected].sort((a, b) => {
+  return [...merged.values()].sort((a, b) => {
     const [aTier, aRank] = keyOf(a.name);
     const [bTier, bRank] = keyOf(b.name);
     return aTier === bTier ? aRank - bRank : aTier - bTier;
-  });
-
-  // Re-word for this model. A tool with no override keeps the server's wording.
-  return ranked.map((tool) => {
-    const override = descriptions[tool.name];
-    return override === undefined ? tool : { ...tool, description: override };
   });
 }

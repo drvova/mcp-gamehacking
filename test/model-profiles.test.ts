@@ -338,3 +338,153 @@ describe("omission is presentation only", () => {
     expect(text).not.toMatch(/ENOENT/);
   });
 });
+
+describe("defining your own tools", () => {
+  /** The full definitions a session currently lists. */
+  const definitionsOf = async (session: Awaited<ReturnType<typeof openSession>>) =>
+    (await session.request(listTools(1)))?.result?.tools ?? [];
+
+  it("removes a bound argument from the schema, so it cannot be got wrong", async () => {
+    const session = await openSession();
+    try {
+      await session.request(
+        toolCall(1, "surface", {
+          pick: [{ tool: "read_agent", as: "read_pinned", args: { name: "exploit-developer" } }],
+        }),
+      );
+
+      const mine = (await definitionsOf(session)).find((tool) => tool.name === "read_pinned");
+      expect(mine).toBeDefined();
+      expect(Object.keys(mine?.inputSchema?.properties ?? {})).not.toContain("name");
+      expect(mine?.inputSchema?.required ?? []).not.toContain("name");
+    } finally {
+      session.close();
+    }
+  });
+
+  it("works when called with nothing at all", async () => {
+    const session = await openSession();
+    try {
+      await session.request(
+        toolCall(1, "surface", {
+          pick: [{ tool: "read_agent", as: "read_pinned", args: { name: "exploit-developer" } }],
+        }),
+      );
+
+      // The whole point: a tool the caller cannot call correctly becomes one it
+      // cannot call incorrectly.
+      const called = await session.request(toolCall(2, "read_pinned", {}));
+      expect(wasRefused(called)).toBe(false);
+      expect(textOf(called)).toContain("exploit-developer");
+    } finally {
+      session.close();
+    }
+  });
+
+  it("keeps a bound argument when the caller sends a different value", async () => {
+    const session = await openSession();
+    try {
+      await session.request(
+        toolCall(1, "surface", {
+          pick: [{ tool: "read_agent", as: "read_pinned", args: { name: "exploit-developer" } }],
+        }),
+      );
+
+      // A bound argument left the schema, so a caller sending it is reaching
+      // past what it was shown. Honouring that would undo the binding.
+      const called = await session.request(toolCall(2, "read_pinned", { name: "something-else" }));
+      expect(textOf(called)).toContain("exploit-developer");
+    } finally {
+      session.close();
+    }
+  });
+
+  it("keeps the arguments it did not bind, and re-words them", async () => {
+    const session = await openSession();
+    try {
+      await session.request(
+        toolCall(1, "surface", {
+          pick: [
+            {
+              tool: "search_skills",
+              as: "find",
+              args: { limit: 5 },
+              argDescriptions: { query: "What you are looking for, in your own words." },
+            },
+          ],
+        }),
+      );
+
+      const mine = (await definitionsOf(session)).find((tool) => tool.name === "find");
+      const properties = mine?.inputSchema?.properties ?? {};
+      expect(Object.keys(properties)).toContain("query");
+      expect(Object.keys(properties)).not.toContain("limit");
+      expect(properties.query?.description).toBe("What you are looking for, in your own words.");
+    } finally {
+      session.close();
+    }
+  });
+
+  it("survives being saved and recalled in a fresh process", async () => {
+    const probe = cleanupProbe();
+    try {
+      const builder = await openSession();
+      try {
+        await builder.request(
+          toolCall(1, "surface", {
+            pick: [
+              {
+                tool: "read_agent",
+                as: "read_pinned",
+                args: { name: "exploit-developer" },
+                description: "My own agent reader, already pointed at the one I use.",
+              },
+            ],
+          }),
+        );
+        const saved = await builder.request(
+          toolCall(2, "surface", {
+            save: PROBE_ID,
+            guidance:
+              "A surface carrying a tool this test defined by binding an argument. Must never survive a run.",
+          }),
+        );
+        expect(wasRefused(saved)).toBe(false);
+      } finally {
+        builder.close();
+      }
+
+      const persisted = JSON.parse(readFileSync(probe, "utf8"));
+      expect(persisted.tools.derived).toHaveLength(1);
+
+      // A separate process must restore the call shape, not merely the name.
+      const recalled = await openSession();
+      try {
+        await recalled.request(toolCall(1, "surface", { set: PROBE_ID }));
+        const mine = (await definitionsOf(recalled)).find((tool) => tool.name === "read_pinned");
+        expect(mine).toBeDefined();
+        expect(Object.keys(mine?.inputSchema?.properties ?? {})).not.toContain("name");
+
+        const called = await recalled.request(toolCall(2, "read_pinned", {}));
+        expect(textOf(called)).toContain("exploit-developer");
+      } finally {
+        recalled.close();
+      }
+    } finally {
+      cleanupProbe();
+    }
+  });
+
+  it("refuses a binding of a tool that does not exist", async () => {
+    const session = await openSession();
+    try {
+      const refused = await session.request(
+        toolCall(1, "surface", { pick: [{ tool: "no_such_tool", as: "ghost", args: {} }] }),
+      );
+      expect(wasRefused(refused)).toBe(true);
+      expect(toolNames(await session.request(listTools(2)))).toEqual(SEED_SURFACE);
+    } finally {
+      session.close();
+    }
+  });
+});

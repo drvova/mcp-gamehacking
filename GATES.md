@@ -67,3 +67,7 @@ Scope: A model builds its own tooling. The server ships no base of tools and no 
 - [x] G14: This ledger passes its own lint
   CHECK: node tools/checks/check.mjs ledger
   EXPECT: gate-passed:ledger
+
+- [x] G15: A model may define its own tools by binding arguments: the bound argument leaves the schema, the tool works when called with nothing, a caller cannot undo the binding, and it survives a save and a fresh process
+  CHECK: node tools/checks/check.mjs derived-tools
+  EXPECT: gate-passed:derived-tools

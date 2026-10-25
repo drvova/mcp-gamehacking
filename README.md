@@ -164,6 +164,31 @@ surface { list: "tools" }             the catalogue again
 surface { list: "surfaces" }          what you have saved
 ```
 
+An entry may also **bind arguments**, which is how a model defines a tool whose
+call shape it cannot get wrong:
+
+```
+surface { pick: [
+  "search_skills",
+  { tool: "read_source", as: "read_kdmapper", args: { name: "ags-kdmapper-1909" } }
+] }
+```
+
+`read_kdmapper` is listed with `name` **gone from its schema** — not merely
+pre-filled — so it is called with no arguments at all. A bound argument leaves
+the schema because an argument the caller can still see is one the caller can
+still get wrong, and removing the decision is the whole point. The model can also
+re-word the arguments that remain with `argDescriptions`, and re-word the tool
+itself with `description`.
+
+Bound arguments win over anything the caller sends: they left the schema, so a
+caller sending one is reaching past what it was shown. A partial binding keeps
+everything it did not bind — `args: { limit: 5 }` on a three-argument tool leaves
+a two-argument tool.
+
+Omit `as` and the tool is redefined under its own name: _"`read_source`, but for
+me `name` is already set."_
+
 `pick` is the path. Nothing is chosen for you — not here, and not anywhere else.
 A composed surface is session-scoped and writes nothing to disk until you `save`
 it, so recomposing when the task changes shape costs one call. Re-saving an id

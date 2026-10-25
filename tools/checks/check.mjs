@@ -825,6 +825,139 @@ const CHECKS = {
     pass("tool-smoke");
   },
 
+  async "derived-tools"() {
+    // A model may define its own tools by binding arguments of registered ones.
+    // This is about the call shape, not the capability: a tool it cannot call
+    // correctly becomes one it cannot call incorrectly, which is what a weaker
+    // model needs most.
+    const session = await openSession();
+    try {
+      const composed = await session.request(
+        toolCall(1, "surface", {
+          pick: [{ tool: "read_agent", as: "read_pinned", args: { name: "exploit-developer" } }],
+        }),
+      );
+      assert(
+        !composed?.result?.isError,
+        `binding a tool failed: ${textOf(composed).slice(0, 200)}`,
+      );
+
+      const listed = (await session.request(listTools(2)))?.result?.tools ?? [];
+      const mine = listed.find((tool) => tool.name === "read_pinned");
+      assert(mine, "the derived tool was not listed under its own name");
+
+      // The bound argument must leave the schema, or the caller can still get it wrong.
+      const properties = mine.inputSchema?.properties ?? {};
+      assert(!("name" in properties), "a bound argument is still in the schema");
+      assert(
+        !(mine.inputSchema?.required ?? []).includes("name"),
+        "a bound argument is still required",
+      );
+
+      // And it must work with nothing sent at all.
+      const called = await session.request(toolCall(3, "read_pinned", {}));
+      assert(!called?.result?.isError, `calling the derived tool failed: ${textOf(called)}`);
+      assert(
+        textOf(called).includes("exploit-developer"),
+        "the bound argument did not reach the base tool",
+      );
+
+      // Binding is a decision: what the caller sends must not undo it.
+      const overridden = await session.request(
+        toolCall(4, "read_pinned", { name: "something-else" }),
+      );
+      assert(
+        textOf(overridden).includes("exploit-developer"),
+        "a caller-supplied value overrode a bound argument",
+      );
+
+      // A partial binding must keep the arguments it did not bind.
+      await session.request(
+        toolCall(5, "surface", {
+          pick: [{ tool: "search_skills", as: "find", args: { limit: 5 } }],
+        }),
+      );
+      const partial = ((await session.request(listTools(6)))?.result?.tools ?? []).find(
+        (tool) => tool.name === "find",
+      );
+      assert(partial, "the partially bound tool was not listed");
+      assert(
+        "query" in (partial.inputSchema?.properties ?? {}),
+        "a partial binding removed an argument it did not bind",
+      );
+      assert(
+        !("limit" in (partial.inputSchema?.properties ?? {})),
+        "a partially bound argument stayed in the schema",
+      );
+    } finally {
+      session.close();
+    }
+
+    // A tool the model defined is part of what it built, so it has to survive
+    // the process, not just the session.
+    const id = "gate-probe-derived";
+    const path = cleanupProfile(id);
+    try {
+      const session = await openSession();
+      try {
+        await session.request(
+          toolCall(1, "surface", {
+            pick: [{ tool: "read_agent", as: "read_pinned", args: { name: "exploit-developer" } }],
+          }),
+        );
+        const saved = await session.request(
+          toolCall(2, "surface", {
+            save: id,
+            guidance:
+              "A gate probe carrying a tool defined by binding an argument. Must never survive a run.",
+          }),
+        );
+        assert(!saved?.result?.isError, `saving a derived tool failed: ${textOf(saved)}`);
+      } finally {
+        session.close();
+      }
+
+      const persisted = JSON.parse(readFileSync(path, "utf8"));
+      assert(
+        persisted.tools.derived.some((entry) => entry.as === "read_pinned"),
+        "the binding was not written to disk",
+      );
+
+      const reopened = await openSession();
+      try {
+        await reopened.request(toolCall(1, "surface", { set: id }));
+        const tools = (await reopened.request(listTools(2)))?.result?.tools ?? [];
+        const mine = tools.find((tool) => tool.name === "read_pinned");
+        assert(mine, "a recalled surface lost the tool it defined");
+        assert(
+          !("name" in (mine.inputSchema?.properties ?? {})),
+          "a recalled surface lost the binding",
+        );
+        const called = await reopened.request(toolCall(3, "read_pinned", {}));
+        assert(
+          textOf(called).includes("exploit-developer"),
+          "the recalled tool did not apply its bound argument",
+        );
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      cleanupProfile(id);
+    }
+
+    // A binding that names nothing must be refused, not listed as a tool that
+    // cannot work.
+    const bogus = await callServer([
+      toolCall(1, "surface", { pick: [{ tool: "no_such_tool", as: "ghost", args: {} }] }),
+    ]);
+    const response = bogus.get(1);
+    assert(
+      Boolean(response?.error) || Boolean(response?.result?.isError),
+      "a binding of a nonexistent tool was accepted",
+    );
+    pass("derived-tools");
+  },
+
   ledger: checkLedger,
 };
 
