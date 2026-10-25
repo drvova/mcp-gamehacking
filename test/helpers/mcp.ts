@@ -135,9 +135,9 @@ export function toolNames(frame: Frame | undefined): string[] {
   return parsed.tools.map((tool) => tool.name);
 }
 
-/** Read the profile id out of a get_model_profile response. */
+/** Read the profile id out of a `surface` report. */
 export function profileIdOf(frame: Frame | undefined): string {
-  const match = textOf(frame).match(/^# Model profile: .*\(`([a-z0-9-]+)`\)/m);
+  const match = textOf(frame).match(/^# Surface: .*\(`([a-z0-9-]+)`\)/m);
   if (!match) throw new Error(`no profile id in: ${textOf(frame).slice(0, 160)}`);
   return match[1];
 }

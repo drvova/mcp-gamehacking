@@ -104,7 +104,7 @@ MCP (Model Context Protocol) server for game hacking & reverse engineering. A st
 
 ---
 
-## Tools (32 total)
+## Tools (29 total)
 
 ### Workflow Tools
 
@@ -135,13 +135,10 @@ MCP (Model Context Protocol) server for game hacking & reverse engineering. A st
 
 ### Profile Tools
 
-| Tool                   | Description                                          |
-| ---------------------- | ---------------------------------------------------- |
-| `list_model_profiles`  | List built-in and model-authored profiles            |
-| `get_model_profile`    | Report the profile governing this session, and why   |
-| `set_model_profile`    | Select a profile for the session, or `auto` to clear |
-| `define_model_profile` | Author and persist a new profile                     |
-| `list_available_tools` | Show every registered tool, carried or not           |
+| Tool                   | Description                                   |
+| ---------------------- | --------------------------------------------- |
+| `surface`              | Report, enumerate, or switch the tool surface |
+| `define_model_profile` | Author and persist a new surface              |
 
 ---
 
@@ -169,21 +166,18 @@ model in particular fits every model badly, so the seed carries seven tools:
 enough to orient, see every option, and then choose.
 
 ```
-get_model_profile      which surface governs this session, and why
-list_model_profiles    the surfaces already built
-list_available_tools   every registered tool, carried or not
-set_model_profile      take one of the above
+surface                report where you are, list what exists, switch
 define_model_profile   build your own
 search_skills          \
 read_skill             / enough to do real work while deciding
 ```
 
 A caller that wants the whole catalogue asks for it: the `full` profile carries
-all 32 tools with the server's own wording.
+all 29 tools with the server's own wording.
 
 **Nothing is withheld by a profile.** A tool a profile does not carry remains
 callable by name. Omission is presentation, never permission, so a narrow or
-wrong profile cannot cost a capability — and `list_available_tools` always shows
+wrong profile cannot cost a capability — and `surface` with `list` always shows
 what exists.
 
 ### Resolution order
@@ -192,7 +186,7 @@ The first match wins:
 
 1. `_meta.profile` on the request — an explicit profile id
 2. `_meta.model` on the request — matched against each profile's `models`
-3. the session override set by `set_model_profile`
+3. the session override set by `surface` with `set`
 4. `MCP_MODEL_PROFILE` or `MCP_MODEL` in the environment
 5. the client name reported at initialize, matched against `clientNames`
 6. `default` — the seed
@@ -204,8 +198,8 @@ everything-surface.
 
 | Profile   | Surface                                          |
 | --------- | ------------------------------------------------ |
-| `default` | the 7-tool seed                                  |
-| `full`    | all 32, registration order, server wording       |
+| `default` | the 4-tool seed                                  |
+| `full`    | all 29, registration order, server wording       |
 | `claude`  | curated-first, with cross-check guidance         |
 | `gpt`     | short deterministic sequences, compact results   |
 | `gemini`  | aggregation-first, per-claim attribution         |
@@ -214,23 +208,30 @@ everything-surface.
 
 ### The surface core
 
-Four tools are carried by **every** surface, whatever else a profile drops:
+One tool is carried by **every** surface, whatever else a profile drops:
 
 ```
-get_model_profile      which surface governs this session, and why
-list_model_profiles    the surfaces already built
-list_available_tools   every registered tool, carried or not
-set_model_profile      switch to a different surface
+surface   report where you are, enumerate what exists, switch to another
 ```
+
+It replaces the four separate administration tools this layer started with: four
+tool slots reduced to one, and management's share of the seed surface down from
+32% to 19%. A model should not spend more of its context describing its tools
+than using them.
+
+`define_model_profile` is the other half of the seed and is deliberately large:
+authoring a surface means choosing tools, ordering them, and writing each one's
+wording, so eleven optional parameters are inherent to it. It is not
+administration — it is the forge.
 
 A profile may choose to be narrow; it may not choose to be _inescapable_. Without
-these, a model auto-detected into `local` could neither see that a profile
+it, a model auto-detected into `local` could neither see that a profile
 governed it nor leave — a capability loss caused by withheld knowledge, landing
 hardest on exactly the small models least able to guess a tool name.
 
 The core is enforced in the shaper, which every profile passes through, so it
 holds for built-ins, authored profiles, and files edited by hand on disk. An
-authored profile that tries to exclude one is told so, and the exclusion is
+authored profile that tries to exclude it is told so, and the exclusion is
 dropped rather than silently honoured.
 
 ### Authoring a profile
@@ -372,7 +373,7 @@ Kernel exploit and driver development agent...
 
 ```
 mcp-gamehacking/
-+-- src/index.ts              # MCP server (32 tools)
++-- src/index.ts              # MCP server (29 tools)
 +-- src/profiles/             # Per-model profile layer
 +|   +-- types.ts              #   profile schema and id rules
 +|   +-- builtin.ts            #   built-in profiles

@@ -11,32 +11,24 @@ import { ModelProfileSchema, type ModelProfile } from "./types.js";
  * model in particular fits every model badly.
  */
 
-/** Tools that let a model orient, see its options, and take or author more. */
-const BOOTSTRAP_TOOLS = [
-  "get_model_profile",
-  "list_model_profiles",
-  "list_available_tools",
-  "set_model_profile",
-  "define_model_profile",
-  "search_skills",
-  "read_skill",
-];
+/**
+ * The seed surface: the smallest thing that lets a caller orient, discover what
+ * exists, and then choose or author. Five of the seven tools here used to be
+ * administration; the whole meta layer is now one tool.
+ */
+const BOOTSTRAP_TOOLS = ["surface", "define_model_profile", "search_skills", "read_skill"];
 
 /**
- * Tools every surface must carry, whatever else it drops.
+ * The tool every surface must carry, whatever else it drops.
  *
- * Without these a narrow profile becomes a trap: the model cannot see that a
- * profile governs it, cannot discover what else exists, and cannot switch. That
- * is a capability loss caused by withheld knowledge rather than by policy, and
- * it would land hardest on exactly the small models least able to guess a tool
+ * One tool does the whole job: report where you are, enumerate what exists, and
+ * switch. Without it a narrow profile is a trap — the model cannot see that a
+ * profile governs it, cannot discover the catalogue, and cannot leave, which is
+ * a capability loss caused by withheld knowledge rather than by policy. That
+ * would land hardest on exactly the small models least able to guess a tool
  * name. A profile may choose to be narrow; it may not choose to be inescapable.
  */
-export const SURFACE_TOOLS = [
-  "get_model_profile",
-  "list_model_profiles",
-  "list_available_tools",
-  "set_model_profile",
-];
+export const SURFACE_TOOLS = ["surface"];
 
 /**
  * Append the mandatory surface tools to a profile's own list, preserving the
@@ -58,13 +50,8 @@ const DEFINITIONS = [
       include: BOOTSTRAP_TOOLS,
       order: BOOTSTRAP_TOOLS,
       descriptions: {
-        get_model_profile:
-          "Start here. Reports which profile governs this session, why it was selected, and the guidance written for it.",
-        list_model_profiles:
-          "See the profiles available. Each one carries a different surface, so pick the one that fits how you work.",
-        list_available_tools:
-          "See every tool the server registers, including the ones this seed does not carry. Nothing is withheld: any tool can be called by name, or added to a profile of your own.",
-        set_model_profile: "Switch to a profile that fits you. Use 'auto' to return to detection.",
+        surface:
+          "Start here. With no arguments it reports which surface governs this session, why, and the guidance written for it. `list` enumerates the surfaces or the whole catalogue; `set` switches you to another.",
         define_model_profile:
           "Build your own surface: choose which tools you carry, the order, and how each is described to you. Saved and reloaded in later sessions.",
         search_skills:
@@ -74,12 +61,12 @@ const DEFINITIONS = [
     },
     guidance:
       "You are running on the seed surface, which is deliberately small: it carries only what you need to orient and then choose. It is not the full library and is not meant to be.\n\n" +
-      "Call `list_available_tools` to see everything the server registers, and `list_model_profiles` to see the surfaces already built. If one fits, take it with `set_model_profile`. If none does, call `define_model_profile` and build the surface you actually want — pick your tools, order them, and write the descriptions in the terms you work best in. That profile persists for later sessions.\n\n" +
+      "One tool manages this: call `surface` with `list` to see every registered tool or the surfaces already built, and with `set` to take one. If none does, call `define_model_profile` and build the surface you actually want — pick your tools, order them, and write the descriptions in the terms you work best in. That profile persists for later sessions.\n\n" +
       "Nothing is withheld while you are on the seed: every tool remains callable by name, so you can finish a task now and shape your surface afterwards.",
     workflow: [
-      "get_model_profile to see which surface you have.",
-      "list_available_tools to see what else exists.",
-      "set_model_profile if a built-in fits, otherwise define_model_profile.",
+      "surface to see which surface you have.",
+      "surface with list to see what else exists.",
+      "surface with set if one fits, otherwise define_model_profile.",
       "search_skills then read_skill to do the work.",
     ],
   },
@@ -255,7 +242,7 @@ const DEFINITIONS = [
     guidance:
       "Your budget is small, so treat every read as expensive. Five working tools are carried here for that reason, plus the four that describe and change your own surface.\n\n" +
       "Never call `read_source` without a specific question: a single archive can exceed 100,000 lines. Work in one direction — narrow with `search_skills`, read the write-up with `read_skill`, and stop once you can answer.\n\n" +
-      "If the five working tools are not enough, call `list_available_tools` to see everything that exists and `set_model_profile` to take a wider surface. Working around the gap costs more than switching does.",
+      "If the five working tools are not enough, call `surface` with `list` to see everything that exists and with `set` to take a wider one. Working around the gap costs more than switching does.",
     workflow: [
       "search_skills once, with the most specific query you can form.",
       "read_skill on the single best hit.",
@@ -285,7 +272,7 @@ const DEFINITIONS = [
     guidance:
       "Four working tools are carried, all with simple arguments, plus the four that describe and change your own surface. Use them one at a time and do not chain steps speculatively.\n\n" +
       "`search_skills` takes a plain query string; if the first query returns nothing useful, try a single distinctive word rather than a sentence. `read_skill` takes one exact skill name copied from a search result. `get_file_tree` needs a project name and `max_entries` of at least 10.\n\n" +
-      "The offset, grep and source tools are deliberately absent: they need careful arguments and produce large output. If you need one, `list_available_tools` shows what exists and `set_model_profile` moves you to a surface that carries it.",
+      "The offset, grep and source tools are deliberately absent: they need careful arguments and produce large output. If you need one, `surface` with `list` shows what exists and with `set` moves you to a surface that carries it.",
     workflow: [
       "skill_stats to confirm the library is reachable.",
       "search_skills with one distinctive word.",

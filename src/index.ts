@@ -15,6 +15,7 @@ import {
   shapeTools,
 } from "./profiles/resolve.js";
 import { PROFILE_ID_MESSAGE, PROFILE_ID_PATTERN } from "./profiles/types.js";
+import type { ModelProfile } from "./profiles/types.js";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const DIRS = {
@@ -396,7 +397,7 @@ const server = new McpServer(
     instructions:
       "Knowledge base for game hacking and reverse engineering: 4,160 skills, 75 agents, 161 subagents, 114 plugins and 148 prompts, including full source archives for roughly 3,980 projects.\n\n" +
       "The tool surface is not fixed. A profile decides which tools you carry, in what order, and how each one is described to you, because models do not work equally well on the same set. The surface you start with is a seed: enough to orient, see every option, and then choose.\n\n" +
-      "Call `get_model_profile` to see which surface governs this session and why, `list_available_tools` to see everything the server registers, and `list_model_profiles` to see the surfaces already built. Take one with `set_model_profile`, or call `define_model_profile` to build your own — pick your tools, order them, and write the descriptions in the terms you work best in. Authored profiles persist for later sessions.\n\n" +
+      "One tool manages this: call `surface` with no arguments to see which surface governs this session and why, with `list` to enumerate the surfaces or the whole catalogue, and with `set` to take one. Or call `define_model_profile` to build your own — pick your tools, order them, and write the descriptions in the terms you work best in. Authored profiles persist for later sessions.\n\n" +
       "Nothing is withheld by a profile: a tool it does not carry stays callable by name, so a narrow surface is a presentation choice, never a lost capability.",
   },
 );
@@ -1879,145 +1880,158 @@ function installProfileAwareToolList(mcp: McpServer): boolean {
   return true;
 }
 
+/** Apply a session surface override. Returns an error message, or null on success. */
+async function applySurface(id: string): Promise<string | null> {
+  if (id === "auto") {
+    setSessionProfile(null);
+    return null;
+  }
+
+  // Apply the override before the first await so a pipelined tools/list cannot
+  // resolve ahead of it, then roll back if the id turns out to be unknown.
+  const previous = getSessionProfile();
+  setSessionProfile(id);
+
+  const { profiles } = await loadProfiles(PROFILE_ROOT);
+  if (!profiles.has(id)) {
+    // Only roll back if nothing newer has taken over in the meantime.
+    if (getSessionProfile() === id) setSessionProfile(previous);
+    return `Unknown surface "${id}". Available: ${[...profiles.keys()].sort().join(", ")}.`;
+  }
+  return null;
+}
+
+/** Enumerate the surfaces, marking the one governing this session. */
+async function renderSurfaces(activeId: string): Promise<string> {
+  const { profiles, invalid } = await loadProfiles(PROFILE_ROOT, { fresh: true });
+  const builtinIds = new Set((await loadProfiles(PROFILE_ROOT)).profiles.keys());
+
+  const rows = [...profiles.values()]
+    .sort((a, b) => a.id.localeCompare(b.id))
+    .map((profile) => {
+      const origin = builtinIds.has(profile.id) ? "built-in" : "model-authored";
+      const mark = profile.id === activeId ? " (active)" : "";
+      const scope =
+        profile.tools.include && profile.tools.include.length > 0
+          ? `${profile.tools.include.length} tools`
+          : "every tool";
+      return `- **${profile.id}**${mark} [${origin}] — ${profile.description}\n  Carries: ${scope}`;
+    });
+
+  const problems = invalid.length
+    ? `\n\nUnusable profile files:\n${invalid.map((entry) => `- ${entry.file}: ${entry.reason}`).join("\n")}`
+    : "";
+
+  const wiring = PROFILES_WIRED
+    ? "Tool listing is profile-aware."
+    : "Tool listing is NOT profile-aware in this build, so every surface presents the full catalogue.";
+
+  return (
+    `# Surfaces (${profiles.size})\n\n${rows.join("\n")}${problems}\n\n${wiring}\n\n` +
+    "Take one with `surface` and `set`, or build your own with `define_model_profile`."
+  );
+}
+
+/** Every registered tool, marking what the active surface carries. */
+async function renderCatalogue(profile: ModelProfile): Promise<string> {
+  const all = await listRegisteredTools();
+  if (all.length === 0) return "The tool catalogue is unavailable in this build.";
+
+  const carried = new Set(shapeTools(all, profile).map((tool) => tool.name));
+  const render = (tools: ToolListResult["tools"]) =>
+    tools
+      .map((tool) => `- \`${tool.name}\`${tool.description ? ` — ${tool.description}` : ""}`)
+      .join("\n");
+
+  const inside = all.filter((tool) => carried.has(tool.name));
+  const outside = all.filter((tool) => !carried.has(tool.name));
+
+  const rest = outside.length
+    ? `\n\n## Not carried by \`${profile.id}\` (${outside.length})\n` +
+      "Registered and callable by name; the surface simply does not present them.\n\n" +
+      render(outside)
+    : "";
+
+  return (
+    `# Tool catalogue (${all.length} registered)\n\n` +
+    `\`${profile.id}\` carries ${inside.length} of them.\n\n` +
+    `## Carried by \`${profile.id}\` (${inside.length})\n${render(inside)}${rest}\n\n` +
+    "Change what you carry with `surface` and `set`, or build a surface with `define_model_profile`."
+  );
+}
+
+/** Report the governing surface: why, its guidance, and what it carries. */
+async function renderSurface(
+  profile: ModelProfile,
+  source: string,
+  matched: string | null,
+  clientName: string | null,
+): Promise<string> {
+  const why = matched
+    ? `selected by \`${source}\` matching \`${matched}\``
+    : "no signal matched, so the seed surface applies";
+
+  const steps = profile.workflow.length
+    ? `\n\n## Recommended workflow\n${profile.workflow.map((step, i) => `${i + 1}. ${step}`).join("\n")}`
+    : "";
+
+  const carried = shapeTools(await listRegisteredTools(), profile).map((tool) => tool.name);
+  const carries = carried.length
+    ? `\n\n## What this surface carries (${carried.length})\n${carried.map((name) => `\`${name}\``).join(", ")}`
+    : "";
+
+  return (
+    `# Surface: ${profile.label} (\`${profile.id}\`)\n\n` +
+    `${profile.description}\n\n` +
+    `Selected because ${why}. Client reported: \`${clientName ?? "unknown"}\`.\n\n` +
+    `## Guidance\n${profile.guidance}${steps}${carries}\n\n` +
+    "A surface shapes which tools are listed, never which are callable: any tool works by name. " +
+    "Use `surface` with `list` to see every surface or the whole catalogue, and with `set` to switch."
+  );
+}
+
 server.tool(
-  "list_available_tools",
-  "List every tool the server registers, marking which ones the active profile carries. Nothing is withheld: a tool this profile omits is still callable by name, and can be added to a profile of your own.",
-  {},
-  async (_args, extra) => {
-    const meta = extra?._meta;
-    const clientName = server.server.getClientVersion()?.name ?? null;
-    const session = getSessionProfile();
-
-    const resolved = await resolveProfile(PROFILE_ROOT, { meta, clientName, session });
-    const all = await listRegisteredTools();
-    if (all.length === 0) {
-      return err("The tool catalogue is unavailable in this build.");
-    }
-
-    const carried = new Set(shapeTools(all, resolved.profile).map((tool) => tool.name));
-    const inProfile = all.filter((tool) => carried.has(tool.name));
-    const outside = all.filter((tool) => !carried.has(tool.name));
-
-    const render = (tools: ToolListResult["tools"]) =>
-      tools
-        .map((tool) => `- \`${tool.name}\`${tool.description ? ` — ${tool.description}` : ""}`)
-        .join("\n");
-
-    const rest = outside.length
-      ? `\n\n## Not carried by \`${resolved.profile.id}\` (${outside.length})\n` +
-        "These are registered and callable by name; the profile simply does not present them.\n\n" +
-        render(outside)
-      : "";
-
-    return ok(
-      `# Tool catalogue (${all.length} registered)\n\n` +
-        `Active profile \`${resolved.profile.id}\` carries ${inProfile.length} of them.\n\n` +
-        `## Carried by \`${resolved.profile.id}\` (${inProfile.length})\n${render(inProfile)}${rest}\n\n` +
-        "To change what you carry, use `set_model_profile` or build a surface with `define_model_profile`.",
-    );
-  },
-);
-
-server.tool(
-  "list_model_profiles",
-  "List every available model profile: built-in ones plus any a model has authored. Also reports profiles that failed to load.",
-  {},
-  async () => {
-    const { profiles, invalid } = await loadProfiles(PROFILE_ROOT, { fresh: true });
-    const builtinIds = new Set((await loadProfiles(PROFILE_ROOT)).profiles.keys());
-    const active = getSessionProfile();
-
-    const rows = [...profiles.values()]
-      .sort((a, b) => a.id.localeCompare(b.id))
-      .map((profile) => {
-        const origin = builtinIds.has(profile.id) ? "built-in" : "model-authored";
-        const mark = profile.id === active ? " (session override)" : "";
-        const scope =
-          profile.tools.include && profile.tools.include.length > 0
-            ? `${profile.tools.include.length} tools listed`
-            : "full surface";
-        return `- **${profile.id}**${mark} [${origin}] — ${profile.description}\n  Presents: ${scope}`;
-      });
-
-    const problems = invalid.length
-      ? `\n\nUnusable profile files:\n${invalid.map((entry) => `- ${entry.file}: ${entry.reason}`).join("\n")}`
-      : "";
-
-    const wiring = PROFILES_WIRED
-      ? "Tool listing is profile-aware."
-      : "Tool listing is NOT profile-aware in this build; the full surface is served.";
-
-    return ok(
-      `Available model profiles (${profiles.size}):\n\n${rows.join("\n")}${problems}\n\n${wiring}`,
-    );
-  },
-);
-
-server.tool(
-  "get_model_profile",
-  "Report the profile governing this session: which profile, why it was selected, its model-specific guidance, and the tool order it applies.",
-  {},
-  async (_args, extra) => {
-    const meta = extra?._meta;
-    const clientName = server.server.getClientVersion()?.name ?? null;
-    const session = getSessionProfile();
-    const resolved = await resolveProfile(PROFILE_ROOT, { meta, clientName, session });
-    const { profile, source, matched } = resolved;
-
-    const why = matched
-      ? `selected by \`${source}\` matching \`${matched}\``
-      : "no signal matched, so the seed surface applies";
-
-    const steps = profile.workflow.length
-      ? `\n\n## Recommended workflow\n${profile.workflow.map((step, i) => `${i + 1}. ${step}`).join("\n")}`
-      : "";
-
-    const order = profile.tools.order.length
-      ? `\n\nPreferred tool order: ${profile.tools.order.map((t) => `\`${t}\``).join(" → ")}`
-      : "";
-
-    return ok(
-      `# Model profile: ${profile.label} (\`${profile.id}\`)\n\n` +
-        `${profile.description}\n\n` +
-        `Selected because ${why}. Client reported: \`${clientName ?? "unknown"}\`.\n\n` +
-        `## Guidance\n${profile.guidance}${steps}${order}\n\n` +
-        `Note: a profile shapes which tools are listed, never which are callable. Any tool can still be called by name.`,
-    );
-  },
-);
-
-server.tool(
-  "set_model_profile",
-  "Select the profile for this session. Use the id from list_model_profiles, or 'auto' to clear the override and fall back to detection.",
+  "surface",
+  "Your tool surface: report it, enumerate what exists, or switch. Call with no arguments to see which surface governs this session, why it was selected, and the guidance written for it.",
   {
-    id: z.string().describe("Profile id, or 'auto' to clear the session override"),
+    list: z
+      .enum(["surfaces", "tools"])
+      .optional()
+      .describe("Enumerate the available surfaces, or every registered tool"),
+    set: z
+      .string()
+      .optional()
+      .describe(
+        "Switch to this surface id, or 'auto' to clear the override and fall back to detection",
+      ),
   },
-  async ({ id }) => {
-    if (id === "auto") {
-      setSessionProfile(null);
-      return ok("Session profile override cleared; detection applies again.");
+  async ({ list, set }, extra) => {
+    const meta = extra?._meta;
+    const clientName = server.server.getClientVersion()?.name ?? null;
+
+    // Apply a switch before resolving, so the report reflects the new surface.
+    if (set !== undefined) {
+      const failure = await applySurface(set);
+      if (failure !== null) return err(failure);
     }
 
-    // Apply the override before the first await so a pipelined tools/list cannot
-    // resolve ahead of it, then roll back if the id turns out to be unknown.
-    const previous = getSessionProfile();
-    setSessionProfile(id);
+    const session = getSessionProfile();
+    const { profile, source, matched } = await resolveProfile(PROFILE_ROOT, {
+      meta,
+      clientName,
+      session,
+    });
 
-    const { profiles } = await loadProfiles(PROFILE_ROOT);
-    if (!profiles.has(id)) {
-      // Only roll back if nothing newer has taken over in the meantime.
-      if (getSessionProfile() === id) setSessionProfile(previous);
-      const known = [...profiles.keys()].sort().join(", ");
-      return err(`Unknown profile "${id}". Available: ${known}.`);
-    }
+    if (list === "surfaces") return ok(await renderSurfaces(profile.id));
+    if (list === "tools") return ok(await renderCatalogue(profile));
 
-    return ok(`Session profile set to \`${id}\`. Subsequent tools/list calls use it.`);
+    return ok(await renderSurface(profile, source, matched, clientName));
   },
 );
 
 server.tool(
   "define_model_profile",
-  "Author a model profile and persist it, so it is available in later sessions. The profile shapes which tools are listed and what guidance get_model_profile returns.",
+  "Author a model profile and persist it, so it is available in later sessions. The profile shapes which tools are listed and what guidance `surface` reports.",
   {
     id: z.string().regex(PROFILE_ID_PATTERN, PROFILE_ID_MESSAGE).describe(PROFILE_ID_MESSAGE),
     label: z.string().describe("Human-readable name"),
@@ -2100,7 +2114,7 @@ server.tool(
 
     return ok(
       `Profile \`${saved.id}\` saved to ${where}.${surfaceNote}\n\n` +
-        `Select it with \`set_model_profile\`, or let it auto-select by naming this client in \`client_names\` or the model in \`models\`.`,
+        `Select it with \`surface\` and \`set\`, or let it auto-select by naming this client in \`client_names\` or the model in \`models\`.`,
     );
   },
 );

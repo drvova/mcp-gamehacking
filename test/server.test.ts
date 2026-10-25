@@ -68,14 +68,14 @@ describe("MCP server contract", () => {
     const info = InitializeResult.parse(responses.get(0)?.result);
 
     expect(info.instructions).toBeTruthy();
-    expect(info.instructions).toContain("get_model_profile");
+    expect(info.instructions).toContain("`surface`");
   });
 
   it("registers every pre-existing tool", async () => {
     // The default listing is a seed now, so presence is asserted against the
     // catalogue rather than the presented surface: a tool may be unlisted and
     // still be registered and callable by name.
-    const catalog = textOf((await callServer([toolCall(1, "list_available_tools")])).get(1));
+    const catalog = textOf((await callServer([toolCall(1, "surface", { list: "tools" })])).get(1));
     for (const tool of EXPECTED_TOOLS) expect(catalog).toContain(`\`${tool}\``);
   });
 });

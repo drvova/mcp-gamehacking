@@ -19,17 +19,9 @@ import {
  *
  * This is deliberately not the whole catalogue: a base that fits no model in
  * particular fits every model badly. The complete set is discoverable via
- * `list_available_tools` and selectable with the `full` profile.
+ * `surface` and selectable with the `full` profile.
  */
-const SEED_SURFACE = [
-  "get_model_profile",
-  "list_model_profiles",
-  "list_available_tools",
-  "set_model_profile",
-  "define_model_profile",
-  "search_skills",
-  "read_skill",
-];
+const SEED_SURFACE = ["surface", "define_model_profile", "search_skills", "read_skill"];
 
 /** Every tool the server registers, in registration order. */
 const FULL_CATALOG = [
@@ -60,20 +52,11 @@ const FULL_CATALOG = [
   "read_plugin",
   "list_prompts",
   "read_prompt",
-  "list_available_tools",
-  "list_model_profiles",
-  "get_model_profile",
-  "set_model_profile",
+  "surface",
   "define_model_profile",
 ];
 
-const PROFILE_TOOLS = [
-  "list_model_profiles",
-  "get_model_profile",
-  "set_model_profile",
-  "define_model_profile",
-  "list_available_tools",
-];
+const PROFILE_TOOLS = ["surface", "define_model_profile"];
 
 const PROBE_ID = "test-probe-profile";
 
@@ -119,7 +102,7 @@ describe("model profile surface", () => {
   });
 
   it("publishes the whole catalogue and marks what the active profile carries", async () => {
-    const responses = await callServer([toolCall(1, "list_available_tools")]);
+    const responses = await callServer([toolCall(1, "surface", { list: "tools" })]);
     const catalog = textOf(responses.get(1));
 
     for (const name of FULL_CATALOG) expect(catalog).toContain(`\`${name}\``);
@@ -137,7 +120,7 @@ describe("model profile surface", () => {
     ];
 
     for (const [clientName, expected] of cases) {
-      const responses = await callServer([toolCall(1, "get_model_profile")], { clientName });
+      const responses = await callServer([toolCall(1, "surface")], { clientName });
       expect(profileIdOf(responses.get(1))).toBe(expected);
     }
   });
@@ -199,20 +182,13 @@ describe("per-tool wording", () => {
 
       const session = await openSession();
       try {
-        await session.request(toolCall(1, "set_model_profile", { id: PROBE_ID }));
+        await session.request(toolCall(1, "surface", { set: PROBE_ID }));
         const listing = await session.request(listTools(2));
 
         const tools = listing?.result?.tools ?? [];
         // The author's own tools first, then the surface core the server
         // guarantees so a profile can never trap a model.
-        expect(tools.map((tool) => tool.name)).toEqual([
-          "skill_stats",
-          "search_skills",
-          "get_model_profile",
-          "list_model_profiles",
-          "list_available_tools",
-          "set_model_profile",
-        ]);
+        expect(tools.map((tool) => tool.name)).toEqual(["skill_stats", "search_skills", "surface"]);
 
         const described = tools.find((tool) => tool.name === "search_skills");
         expect(String(described?.description ?? "")).toContain("PROBE WORDING");
@@ -240,10 +216,7 @@ describe("per-request overrides", () => {
       "skill_stats",
       "list_skills",
       "get_file_tree",
-      "get_model_profile",
-      "list_model_profiles",
-      "list_available_tools",
-      "set_model_profile",
+      "surface",
     ]);
     expect(toolNames(responses.get(2))).toEqual(SEED_SURFACE);
     // An unknown id must fall through rather than blank the surface.
@@ -252,8 +225,8 @@ describe("per-request overrides", () => {
 
   it("honours _meta.model", async () => {
     const responses = await callServer([
-      toolCall(1, "get_model_profile", {}, { model: "claude-opus-4" }),
-      toolCall(2, "get_model_profile", {}, { model: "gpt-5" }),
+      toolCall(1, "surface", {}, { model: "claude-opus-4" }),
+      toolCall(2, "surface", {}, { model: "gpt-5" }),
     ]);
 
     expect(profileIdOf(responses.get(1))).toBe("claude");
@@ -269,10 +242,10 @@ describe("per-request overrides", () => {
 });
 
 describe("session override", () => {
-  it("reshapes the listing after set_model_profile", async () => {
+  it("reshapes the listing after switching surface", async () => {
     const session = await openSession();
     try {
-      const set = await session.request(toolCall(1, "set_model_profile", { id: "local" }));
+      const set = await session.request(toolCall(1, "surface", { set: "local" }));
       expect(textOf(set)).toContain("`local`");
 
       const narrowed = await session.request(listTools(2));
@@ -281,14 +254,13 @@ describe("session override", () => {
         "read_skill",
         "skill_stats",
         "get_file_tree",
-        "get_model_profile",
-        "list_model_profiles",
-        "list_available_tools",
-        "set_model_profile",
+        "surface",
       ]);
 
-      const cleared = await session.request(toolCall(3, "set_model_profile", { id: "auto" }));
-      expect(textOf(cleared)).toContain("cleared");
+      const cleared = await session.request(toolCall(3, "surface", { set: "auto" }));
+      // Clearing falls through to the report, so the caller immediately sees
+      // which surface it landed on rather than being told to ask again.
+      expect(textOf(cleared)).toContain("Seed");
 
       const restored = await session.request(listTools(4));
       expect(toolNames(restored)).toEqual(SEED_SURFACE);
@@ -300,10 +272,8 @@ describe("session override", () => {
   it("refuses an unknown profile and keeps the previous state", async () => {
     const session = await openSession();
     try {
-      const refused = await session.request(
-        toolCall(1, "set_model_profile", { id: "no-such-profile" }),
-      );
-      expect(textOf(refused)).toMatch(/Unknown profile/);
+      const refused = await session.request(toolCall(1, "surface", { set: "no-such-profile" }));
+      expect(textOf(refused)).toMatch(/Unknown surface/);
 
       const listing = await session.request(listTools(2));
       expect(toolNames(listing)).toEqual(SEED_SURFACE);
@@ -314,12 +284,7 @@ describe("session override", () => {
 });
 
 describe("surface escape guarantee", () => {
-  const CORE = [
-    "get_model_profile",
-    "list_model_profiles",
-    "list_available_tools",
-    "set_model_profile",
-  ];
+  const CORE = ["surface"];
 
   it("carries the surface core on every built-in profile, however narrow", async () => {
     const responses = await callServer([
@@ -373,10 +338,10 @@ describe("surface escape guarantee", () => {
   it("lets a model on the narrowest surface actually widen it", async () => {
     const session = await openSession();
     try {
-      await session.request(toolCall(1, "set_model_profile", { id: "local" }));
+      await session.request(toolCall(1, "surface", { set: "local" }));
       const narrow = toolNames(await session.request(listTools(2)));
 
-      await session.request(toolCall(3, "set_model_profile", { id: "full" }));
+      await session.request(toolCall(3, "surface", { set: "full" }));
       const wide = toolNames(await session.request(listTools(4)));
 
       expect(wide.length).toBeGreaterThan(narrow.length);
@@ -407,33 +372,19 @@ describe("model-authored profiles", () => {
     const persisted = JSON.parse(readFileSync(path, "utf8"));
     expect(persisted.id).toBe(PROBE_ID);
     // The author's tools first, then the surface core the server guarantees.
-    expect(persisted.tools.include).toEqual([
-      "skill_stats",
-      "search_skills",
-      "get_model_profile",
-      "list_model_profiles",
-      "list_available_tools",
-      "set_model_profile",
-    ]);
+    expect(persisted.tools.include).toEqual(["skill_stats", "search_skills", "surface"]);
 
     // A separate process must see it, which proves persistence rather than cache.
     const session = await openSession();
     try {
-      const listed = await session.request(toolCall(1, "list_model_profiles"));
+      const listed = await session.request(toolCall(1, "surface", { list: "surfaces" }));
       expect(textOf(listed)).toContain(PROBE_ID);
 
-      const selected = await session.request(toolCall(2, "set_model_profile", { id: PROBE_ID }));
+      const selected = await session.request(toolCall(2, "surface", { set: PROBE_ID }));
       expect(textOf(selected)).toContain(PROBE_ID);
 
       const listing = await session.request(listTools(3));
-      expect(toolNames(listing)).toEqual([
-        "skill_stats",
-        "search_skills",
-        "get_model_profile",
-        "list_model_profiles",
-        "list_available_tools",
-        "set_model_profile",
-      ]);
+      expect(toolNames(listing)).toEqual(["skill_stats", "search_skills", "surface"]);
     } finally {
       session.close();
     }
@@ -494,7 +445,7 @@ describe("profile semantics", () => {
   it("carries distinct, substantive guidance per model", async () => {
     const ids = ["claude", "gpt", "gemini", "compact", "local"];
     const responses = await callServer(
-      ids.map((id, index) => toolCall(index + 1, "get_model_profile", {}, { profile: id })),
+      ids.map((id, index) => toolCall(index + 1, "surface", {}, { profile: id })),
     );
 
     const guidances = ids.map((_, index) => {
