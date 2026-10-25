@@ -881,27 +881,47 @@ async function checkLedger() {
   assert(existsSync(path), "GATES.md is missing");
 
   const text = readFileSync(path, "utf8");
-  const gates = [...text.matchAll(/^- \[([ x])\] (G\d+): (.+)$/gm)].map((match) => ({
-    done: match[1] === "x",
-    id: match[2],
-    title: match[3].trim(),
-  }));
-  assert(gates.length > 0, "GATES.md declares no gates");
 
-  for (const [index, gate] of gates.entries()) {
+  // Parse gate blocks: a heading line plus the indented lines that follow it.
+  const blocks = text
+    .split(/\n(?=- \[[ x]\] G\d+:)/)
+    .filter((block) => /^- \[[ x]\] G\d+:/.test(block))
+    .map((block) => {
+      const heading = /^- \[([ x])\] (G\d+): (.+)$/m.exec(block);
+      const check = /CHECK: (.+)$/m.exec(block);
+      return {
+        done: heading?.[1] === "x",
+        id: heading?.[2] ?? "",
+        title: (heading?.[3] ?? "").trim(),
+        command: (check?.[1] ?? "").trim(),
+      };
+    });
+
+  assert(blocks.length > 0, "GATES.md declares no gates");
+
+  for (const [index, gate] of blocks.entries()) {
     assert(gate.id === `G${index + 1}`, `gate ${index + 1} is numbered ${gate.id}`);
     assert(gate.title.length > 0, `${gate.id} has no title`);
+    assert(gate.command.length > 0, `${gate.id} has no CHECK line`);
   }
 
   // Every CHECK line must name a command this harness can actually run, so a
   // renamed or removed check cannot leave the ledger pointing at nothing.
-  const referenced = [...text.matchAll(/check\.mjs (\S+)/g)].map((match) => match[1]);
-  assert(referenced.length > 0, "GATES.md references no checks");
-  for (const name of referenced) {
-    assert(name in CHECKS, `GATES.md references unknown check "${name}"`);
+  for (const gate of blocks) {
+    const named = /check\.mjs (\S+)/.exec(gate.command);
+    if (named) {
+      assert(named[1] in CHECKS, `GATES.md references unknown check "${named[1]}"`);
+    }
   }
 
-  const unmet = gates.filter((gate) => !gate.done).map((gate) => gate.id);
+  // This check is its own gate's evidence, so it must not fail on its own
+  // checkbox: the run that proves it cannot pass until a previous run has
+  // marked it, which cannot happen while it is failing. Every other gate must
+  // be met.
+  const unmet = blocks
+    .filter((gate) => !gate.done && !/check\.mjs ledger/.test(gate.command))
+    .map((gate) => gate.id);
+
   assert(unmet.length === 0, `unmet gates: ${unmet.join(", ")}`);
 
   pass("ledger");

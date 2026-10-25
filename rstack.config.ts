@@ -53,5 +53,9 @@ define.fmt({
     // would rewrite data to satisfy a code formatter.
     "profiles/**",
     "model-profiles/**",
+    // The gate ledger is parsed, not read as prose: both the local gate runner
+    // and the portable `ledger` check match its exact line shapes, so a
+    // formatter reflowing it would break the checks rather than tidy them.
+    "GATES.md",
   ],
 });
