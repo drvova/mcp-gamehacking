@@ -333,6 +333,9 @@ describe("one long-lived namespace", () => {
   });
 
   it("numbers source lines the way grepSource does", async () => {
+    // Needs a real source dump to compare positions against.
+    if (!requireArchive("numbers source lines the way grepSource does")) return;
+
     // Two APIs report positions in the same file, so they must agree. They did
     // not: grepSource reported `492: text` (1-based) while sourceLines took
     // 0-based indices, so feeding one into the other returned the WRONG LINE —
@@ -363,6 +366,31 @@ describe("one long-lived namespace", () => {
 
     const span = await run("(await (await open('ags-eddeeh-kdmapper')).sourceLines(1, 3)).length");
     expect(span).toBe("3");
+  });
+
+  it("only lists definitions it can actually call", async () => {
+    // `kept()` is the model's vocabulary, so every name it lists must be bound.
+    // The two can disagree: bindings load once at startup while the directory is
+    // read live, and several sessions can share one harness directory — so a
+    // definition saved by another session appeared as available while absent.
+    // Start the session FIRST: the definition must appear while the server is
+    // already running, which is the case that broke — bindings load at startup,
+    // the directory is read live.
+    await run("1");
+
+    writeFileSync(
+      join(harnessDir, "appeared.js"),
+      'globalThis.appeared = () => "late";\n' +
+        'try { Object.defineProperty(globalThis.appeared, "name", { value: "appeared", configurable: true }); } catch {}\n',
+    );
+
+    expect(await run("kept().includes('appeared')")).toBe("false");
+    expect(await run("unloaded().includes('appeared')")).toBe("true");
+    expect(await run("kept().every((n) => typeof globalThis[n] !== 'undefined')")).toBe("true");
+
+    // And load() binds it, which is the point of reporting it.
+    expect(await run("load(); kept().includes('appeared')")).toBe("true");
+    expect(await run("appeared()")).toBe("late");
   });
 
   it("reports a syntax error without running anything", async () => {

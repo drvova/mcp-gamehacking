@@ -73,6 +73,12 @@ from inside that namespace rather than advertised as verbs.
   CHECK: node tools/checks/check.mjs errors-are-described
   EXPECT: gate-passed:errors-are-described
 
+## What the model is told it has, it can call
+
+- [x] G29: Every name `kept()` lists is bound and callable, and a definition saved by another session — which appears on disk while this process runs — is reported by `unloaded()` instead, with `load()` binding it. Bindings load once at startup while the directory is read live, so the two disagreed: `kept()` offered a tool that raised `ReferenceError` when called
+  CHECK: node tools/checks/check.mjs kept-is-callable
+  EXPECT: gate-passed:kept-is-callable
+
 ## Two APIs numbering the same file agree
 
 - [x] G28: `grepSource` and `sourceLines` number lines the same way — a line number taken from one and passed to the other returns the SAME line. They did not: `grepSource` reported `492: text` (1-based, editor style) while `sourceLines` took 0-based indices, so the natural move returned the wrong line SILENTLY, with both answers looking plausible
@@ -208,6 +214,8 @@ from inside that namespace rather than advertised as verbs.
 | G15 | report no source for a skill that has one | `sourceSize reported nothing useful: null` |
 | G16 | classify definitions without checking what they depend on | `a pipeline did not run in source order: While defining: rows is not defined` |
 | G17 | save a declaration whose initializer calls something | `a computed value was persisted as a tool: after.js, before.js, doubleAll.js` |
+| G29 | `kept()` reads the directory instead of the bindings | `an unbound definition was reported as kept: true\|true\|undefined` |
+| G29 | stop seeding `load` | `load() did not bind the saved definition: ReferenceError: load is not defined` |
 | G28 | restore 0-based half-open `sourceLines` | `grepSource and sourceLines disagree about which line holds a match: 492:DISAGREE 1508:DISAGREE 1535:DISAGREE` |
 | G27 | add a gate without a ledger entry | `these gates have no ledger entry: ledger-matches-battery` |
 | G27 | name a check in the ledger that does not exist | `the ledger names gates that do not exist: manual-typo` |

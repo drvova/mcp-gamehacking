@@ -1411,6 +1411,52 @@ missing.length === 0 ? "all reachable" : "missing: " + missing.join(", ")`,
     });
   },
 
+  async "kept-is-callable"() {
+    await gate("kept-is-callable", async (dir) => {
+      // `kept()` is the model's vocabulary: it reads it to decide what it can
+      // call. So every name it lists must be BOUND. The two could disagree
+      // because bindings load once at startup while the directory is read live,
+      // and several sessions can share one harness directory — a definition
+      // saved by another session showed up as available while being absent.
+      const session = await openSession({ env: envFor(dir) });
+      try {
+        // A definition that appears WHILE this process runs, which is the live
+        // case: another session writes it.
+        writeFileSync(
+          join(dir, "appeared.js"),
+          'globalThis.appeared = () => "late";\n' +
+            'try { Object.defineProperty(globalThis.appeared, "name", { value: "appeared", configurable: true }); } catch {}\n',
+        );
+
+        const state = await run(
+          session,
+          "`${kept().includes('appeared')}|${unloaded().includes('appeared')}|${typeof appeared}`",
+        );
+        assert(
+          state.includes("false|true|undefined"),
+          `an unbound definition was reported as kept: ${state}`,
+        );
+
+        // The invariant, stated directly.
+        const invariant = await run(
+          session,
+          "kept().every((n) => typeof globalThis[n] !== 'undefined') ? 'holds' : 'VIOLATED'",
+        );
+        assert(
+          invariant.includes("holds"),
+          `kept() listed a name that is not callable: ${invariant}`,
+        );
+
+        // And load() is the way to pick it up, so it must be callable and work.
+        const loaded = await run(session, "load(); `${kept().includes('appeared')}|${appeared()}`");
+        assert(loaded.includes("true|late"), `load() did not bind the saved definition: ${loaded}`);
+      } finally {
+        session.close();
+      }
+      pass("kept-is-callable");
+    });
+  },
+
   async "index-stability"() {
     if (!archivePresent()) skip("index-stability", "archive data absent");
     await gate("index-stability", async (dir) => {

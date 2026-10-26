@@ -1120,18 +1120,45 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
    */
   let peakHeap = 0;
 
-  const kept = (): string[] =>
+  /** Definitions saved on disk. Internal: `load` reads these, and the model sees
+   *  the usable subset through `kept()`. */
+  const savedNames = (): string[] =>
     fs
       .readdirSync(dir)
       .filter((file) => file.endsWith(".js"))
       .map((file) => file.slice(0, -3))
       .sort();
 
+  /**
+   * Whether a saved definition is actually BOUND in this namespace.
+   *
+   * The two can disagree, and the disagreement is not hypothetical: bindings are
+   * loaded once at startup, while the directory is read live, and several
+   * sessions can share one harness directory. A definition saved by another
+   * session therefore appears on disk while being absent here — and `kept()`
+   * reporting it would tell the model it has a tool it cannot call.
+   */
+  const isBound = (name: string): boolean => {
+    try {
+      const globalObject = vm.runInContext("globalThis", context) as Record<string, unknown>;
+      return Object.hasOwn(globalObject, name) && globalObject[name] !== undefined;
+    } catch {
+      return false;
+    }
+  };
+
+  /** What the model can call right now. Every name here is bound. */
+  const kept = (): string[] => savedNames().filter(isBound);
+
+  /** Saved definitions that are not bound yet — written by another session, or by
+   *  an earlier process. `load()` picks them up. */
+  const unloaded = (): string[] => savedNames().filter((name) => !isBound(name));
+
   /** Load persisted definitions. Each in its own try/except: one broken saved
    *  definition must not stop the server from booting. */
   const load = (): string[] => {
     const broken: string[] = [];
-    for (const name of kept()) {
+    for (const name of savedNames()) {
       try {
         const saved = fs.readFileSync(fileFor(name), "utf8");
         const doc = docFromSavedFile(saved);
@@ -1173,7 +1200,11 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
       "  describe(search_skills)                       one function's arguments and doc",
       "  describe(doc)                                 an object's public members",
       "  S                                             the `strings` you passed, by name",
-      "  kept()                                        what you have defined and kept",
+      "  kept()                                        what you have defined and can CALL",
+      "                                             right now — every name it lists is bound",
+      "  unloaded()                                    saved definitions NOT bound here, e.g.",
+      "                                             written by another session sharing this dir",
+      "  load()                                        bind those, returning any that failed",
       "  stats()                                       heap, kept count, sessions — for big reads",
       '  forget("name")                                delete one',
       "  man()                                         this page",
@@ -1457,6 +1488,8 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
   seed("open", open);
   seed("describe", describe);
   seed("kept", kept);
+  seed("unloaded", unloaded);
+  seed("load", load);
   seed("forget", forget);
   seed("man", manual);
   seed("S", {});
@@ -1502,6 +1535,7 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
     heapMB: Math.round((process.memoryUsage().heapUsed / 1048576) * 10) / 10,
     peakMB: Math.round((peakHeap / 1048576) * 10) / 10,
     kept: kept().length,
+    unloaded: unloaded().length,
     sessions: sessions.size,
   }));
 
@@ -1532,7 +1566,7 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
     }
   };
 
-  return { run, manual, kept, forget, load, dir };
+  return { run, manual, kept, unloaded, forget, load, dir };
 }
 
 /** Where persisted definitions live: `<ENV_PREFIX>_HARNESS_DIR`, else a default. */
