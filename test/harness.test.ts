@@ -288,6 +288,50 @@ describe("one long-lived namespace", () => {
     expect(custom).toMatch(/MyErr: custom/);
   });
 
+  it("does not save a container the call mutates", async () => {
+    // A `const` container is not automatically a tool. `const acc = []; acc.push(x)`
+    // is an accumulator, and saving it means the next call starts with the previous
+    // call's contents — the stale-value problem of a `let`, reached a different way.
+    await run("const acc = [];\nacc.push(1);\nacc.push(2);");
+    expect(readdirSync(harnessDir)).not.toContain("acc.js");
+
+    // And the state genuinely does not leak into the next call.
+    expect(await run("typeof acc")).toMatch(/undefined/);
+
+    await run("const log = {};\nlog.a = 1;");
+    expect(readdirSync(harnessDir)).not.toContain("log.js");
+
+    await run("const arr = [];\narr[0] = 1;");
+    expect(readdirSync(harnessDir)).not.toContain("arr.js");
+
+    await run("const o = { a: 1 };\ndelete o.a;");
+    expect(readdirSync(harnessDir)).not.toContain("o.js");
+
+    await run("const c = { n: 0 };\nc.n++;");
+    expect(readdirSync(harnessDir)).not.toContain("c.js");
+
+    await run("const out = [];\nfor (let i = 0; i < 3; i++) out.push(i);");
+    expect(readdirSync(harnessDir)).not.toContain("out.js");
+
+    await run("const xs = [3, 1];\nxs.sort();");
+    expect(readdirSync(harnessDir)).not.toContain("xs.js");
+  });
+
+  it("keeps a container that is only READ, since reading is not mutation", async () => {
+    await run("const names = ['a', 'b'];");
+    expect(readdirSync(harnessDir)).toContain("names.js");
+
+    await run("const cfg = { retries: 3 };");
+    expect(readdirSync(harnessDir)).toContain("cfg.js");
+
+    // A member read and a pure method call are not mutation either.
+    await run("const cfg2 = { r: 3 };\nconst v = cfg2.r;");
+    expect(readdirSync(harnessDir)).toContain("cfg2.js");
+
+    await run("const rows = [1, 2];\nconst n = rows.length;");
+    expect(readdirSync(harnessDir)).toContain("rows.js");
+  });
+
   it("reports a syntax error without running anything", async () => {
     const failed = await run("const = ;");
 

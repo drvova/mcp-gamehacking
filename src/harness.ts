@@ -211,6 +211,71 @@ function findAsiAccident(ast: acorn.Program, code: string): { line: number } | n
 }
 
 /**
+ * Names that this call MUTATES.
+ *
+ * A `const` container is not automatically a tool: `const acc = []; acc.push(x)`
+ * is an accumulator, and saving it means the next call starts with the previous
+ * call's contents — the same stale-value problem as a `let`, reached a different
+ * way. Mutation is a method call on the name, an assignment to its member, or a
+ * delete of its member:
+ *
+ *     acc.push(x)      acc.x = 1      delete acc.x      acc[0] = 1
+ *
+ * A member READ (`cfg.retries`) is not mutation and stays a tool. Flagging a
+ * method call that turns out to be pure (`rows.map(...)`) errs toward call-local,
+ * which is the safe direction: a tool not saved is noticed, while a saved
+ * accumulator silently corrupts the next call.
+ */
+function mutatedNames(ast: acorn.Program): Set<string> {
+  const mutated = new Set<string>();
+
+  const receiverOf = (node: unknown): string | undefined => {
+    if (node === null || typeof node !== "object") return undefined;
+    const record = node as Record<string, unknown>;
+    if (record.type !== "MemberExpression") return undefined;
+    const object = record.object;
+    if (object === null || typeof object !== "object") return undefined;
+    const obj = object as Record<string, unknown>;
+    return obj.type === "Identifier" && typeof obj.name === "string" ? obj.name : undefined;
+  };
+
+  const visit = (node: unknown, isCallee: boolean): void => {
+    if (node === null || typeof node !== "object") return;
+    const record = node as Record<string, unknown> & { type?: string };
+
+    // A method call on the name: `acc.push(...)`.
+    if (record.type === "CallExpression" && isCallee === false) {
+      const called = receiverOf(record.callee);
+      if (called !== undefined) mutated.add(called);
+    }
+
+    // An assignment or update to its member: `acc.x = 1`, `acc[0] = 1`, `acc.x++`.
+    if (record.type === "AssignmentExpression" || record.type === "UpdateExpression") {
+      const target = receiverOf(record.left ?? record.argument);
+      if (target !== undefined) mutated.add(target);
+    }
+
+    // `delete acc.x`.
+    if (record.type === "UnaryExpression" && record.operator === "delete") {
+      const target = receiverOf(record.argument);
+      if (target !== undefined) mutated.add(target);
+    }
+
+    for (const [key, value] of Object.entries(record)) {
+      if (key === "start" || key === "end" || key === "loc" || key === "range") continue;
+      if (Array.isArray(value)) {
+        for (const child of value) visit(child, false);
+      } else if (value !== null && typeof value === "object") {
+        visit(value, key === "callee");
+      }
+    }
+  };
+
+  visit(ast, false);
+  return mutated;
+}
+
+/**
  * Whether a node is a static value: something that can be written down again
  * without re-running anything.
  *
@@ -1121,6 +1186,9 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
       "    saved      const names = ['a', 'b']      a list, a number, a string",
       "    saved      const path = `skills/ags`     a template with no ${} in it",
       "",
+      "    NOT saved  const acc = []; acc.push(1)   a container you MUTATE is an",
+      "                                             accumulator, not a tool — it would",
+      "                                             carry its contents into the next call",
       "    NOT saved  let total = 0                 `let`/`var` are scratch — a mutable",
       "                                             binding would carry a stale value",
       "                                             into the next call. Use `const`.",
@@ -1190,12 +1258,21 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
     // work. Persisting it would also be impossible: the top-level run happens
     // before the work, so `d` would not exist yet.
     const callLocal = new Set<string>();
+    // A container this call mutates is an accumulator, not a tool.
+    for (const name of mutatedNames(ast)) callLocal.add(name);
     const kinds = new Map<acorn.Node, "definition" | "work">();
     for (let pass = 0; pass <= ast.body.length; pass += 1) {
       let changed = false;
       for (const statement of ast.body) {
+        // Two ways a statement is call-local: it reads a name this call bound, or
+        // it BINDS a name this call mutates. The second is the accumulator case —
+        // `const acc = []` does not reference `acc`, so the reference check alone
+        // never fired for it.
+        const bindsMutated = boundNames(statement).some((name) => callLocal.has(name));
         const kind: "definition" | "work" =
-          isDefinition(statement) && !referencesNames(statement, callLocal) ? "definition" : "work";
+          isDefinition(statement) && !bindsMutated && !referencesNames(statement, callLocal)
+            ? "definition"
+            : "work";
         if (kinds.get(statement) !== kind) {
           kinds.set(statement, kind);
           changed = true;

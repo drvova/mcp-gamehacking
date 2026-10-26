@@ -73,6 +73,12 @@ from inside that namespace rather than advertised as verbs.
   CHECK: node tools/checks/check.mjs errors-are-described
   EXPECT: gate-passed:errors-are-described
 
+## An accumulator does not become a tool
+
+- [x] G25: A `const` container the call MUTATES is not saved — `const acc = []; acc.push(x)` is an accumulator, and saving it would start the next call with the previous call's contents — while a container that is only READ (a member read or a pure method call) is still saved
+  CHECK: node tools/checks/check.mjs no-accumulators-saved
+  EXPECT: gate-passed:no-accumulators-saved
+
 ## A long scan returns, and says how much it covered
 
 - [x] G24: EVERY capability that scans the archive respects a time budget and returns partial results with an honest note — instead of outlasting the host's request timeout and returning nothing — and the note reports the CORPUS size, not the count it reached, while a narrowed search is complete and says so by not claiming to be partial. The same defect was in three capabilities (`grep_sources`, `find_offset`, `find_function`), so they now share one scanner
@@ -184,6 +190,8 @@ from inside that namespace rather than advertised as verbs.
 | G15 | report no source for a skill that has one | `sourceSize reported nothing useful: null` |
 | G16 | classify definitions without checking what they depend on | `a pipeline did not run in source order: While defining: rows is not defined` |
 | G17 | save a declaration whose initializer calls something | `a computed value was persisted as a tool: after.js, before.js, doubleAll.js` |
+| G25 | drop the mutation check entirely | `an array pushed to leaked into the next call: acc is object` |
+| G25 | keep mutation detection but not consult the bound name | `an array pushed to leaked into the next call: acc is object` |
 | G24 | remove the scan budget | `the scan ran 44994ms with a 1500ms budget` (the host timeout) |
 | G24 | leave `find_offset` unbounded | `no answer within 90s: await find_offset({ query: '0x140001000', budget_ms: 1500 })` |
 | G24 | count coverage as it goes instead of up front | `the corpus size reported is wrong: 113` |

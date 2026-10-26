@@ -1230,6 +1230,46 @@ missing.length === 0 ? "all reachable" : "missing: " + missing.join(", ")`,
     });
   },
 
+  async "no-accumulators-saved"() {
+    await gate("no-accumulators-saved", async (dir) => {
+      const session = await openSession({ env: envFor(dir) });
+      try {
+        // A `const` container the call MUTATES is an accumulator, not a tool.
+        // Saving it means the next call starts with the previous call's contents,
+        // which is silent corruption rather than a visible error.
+        const cases = [
+          ["an array pushed to", "const acc = [];\nacc.push(1);\nacc.push(2);", "acc"],
+          ["an object written to", "const log = {};\nlog.a = 1;", "log"],
+          ["an array indexed", "const arr = [];\narr[0] = 1;", "arr"],
+          ["a member deleted", "const o = { a: 1 };\ndelete o.a;", "o"],
+          ["a member updated", "const c = { n: 0 };\nc.n++;", "c"],
+          [
+            "an accumulator in a loop",
+            "const out = [];\nfor (let i = 0; i < 3; i++) out.push(i);",
+            "out",
+          ],
+        ];
+        for (const [label, code, name] of cases) {
+          const output = await run(session, code);
+          const leaked = await run(session, `typeof ${name}`);
+          assert(
+            !/^(object|function)$/m.test(leaked.trim()),
+            `${label} leaked into the next call: ${name} is ${leaked.trim()}`,
+          );
+          assert(output !== undefined, `running ${label} produced nothing`);
+        }
+
+        // Reading is not mutation, so a read-only container is still a tool.
+        await run(session, "const names = ['a', 'b'];");
+        const names = await run(session, "Array.isArray(names) ? names.length : 'GONE'");
+        assert(/^2$/m.test(names.trim()), `a read-only container was not saved: ${names.trim()}`);
+      } finally {
+        session.close();
+      }
+      pass("no-accumulators-saved");
+    });
+  },
+
   async "index-stability"() {
     if (!archivePresent()) skip("index-stability", "archive data absent");
     await gate("index-stability", async (dir) => {
