@@ -67,6 +67,12 @@ from inside that namespace rather than advertised as verbs.
   CHECK: node tools/checks/check.mjs helper-identity
   EXPECT: gate-passed:helper-identity
 
+## The manual tells the truth
+
+- [x] G20: Every line of the manual's own persistence table is read back and executed — a manual that misdescribes the rules fails here rather than misleading a model, and it states the rule at all rather than leaving a model to discover it by losing a tool
+  CHECK: node tools/checks/check.mjs manual-is-true
+  EXPECT: gate-passed:manual-is-true
+
 ## A project's source, in-process
 
 - [x] G15: A project's source dump comes with the document — `sourceSize` reports it, `sourceLines` reads a range lazily, `grepSource` searches it streamed with line numbers, a capped search says how many matched, a skill without a dump refuses plainly, and a ranged read of the **100 MB** dump does not pull it into memory
@@ -151,6 +157,8 @@ from inside that namespace rather than advertised as verbs.
 | G15 | report no source for a skill that has one | `sourceSize reported nothing useful: null` |
 | G16 | classify definitions without checking what they depend on | `a pipeline did not run in source order: While defining: rows is not defined` |
 | G17 | save a declaration whose initializer calls something | `a computed value was persisted as a tool: after.js, before.js, doubleAll.js` |
+| G20 | print `let` as saved in the manual | `the manual says \`let total = 0\` is saved, but it was not saved` |
+| G20 | print arithmetic as saved in the manual | `the manual says \`const sum = 1 + 2\` is saved, but it was not saved` |
 | G19 | save a computed initializer | `a computed value was persisted as a tool: after.js, before.js, doubleAll.js` |
 | G19 | save a mutable binding | `scratchLet was saved but should be skipped` |
 | G19 | treat a template with expressions as static | `computeTemplate was saved but should be skipped` |

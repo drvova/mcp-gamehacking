@@ -535,6 +535,69 @@ const gates = {
     });
   },
 
+  async "manual-is-true"() {
+    await gate("manual-is-true", async (dir) => {
+      // The manual is what a model reads to decide what to write, so every claim
+      // it makes about persistence is checked against what actually happens. A
+      // manual that misdescribes the rules is worse than no manual: the model
+      // writes code that silently loses its tools.
+      const session = await openSession({ env: envFor(dir) });
+      try {
+        const manual = await run(session, "");
+        assert(/WHAT IS SAVED/.test(manual), "the manual does not state the persistence rule");
+
+        // The manual's OWN table is the assertion: every line it prints is read
+        // back and executed, so a manual that describes the rules wrongly fails
+        // here rather than misleading a model. Checking a hand-written list
+        // instead would let the manual drift while the gate stayed green.
+        // The manual prints a two-column table; the code is the first column.
+        // Split on the column gap rather than a lazy capture, which would match
+        // the first single space and yield nothing usable.
+        const rows = manual
+          .split("\n")
+          .map((line) => /^\s{4}(saved|NOT saved)\s+(.*)$/.exec(line))
+          .filter((match) => match !== null)
+          .map((match) => ({
+            saves: match[1] === "saved",
+            code: match[2].split(/\s{2,}/)[0].trim(),
+          }))
+          .filter((row) => row.code.length > 0);
+
+        assert(rows.length >= 8, `the manual's table has only ${rows.length} usable rows`);
+
+        for (const row of rows) {
+          // The claimed code may carry an inline comment; run just the code.
+          const code = row.code.replace(/\s{2,}.*$/, "").trim();
+          // The DECLARED name, not a parameter: `const f = (n) => n * 2` binds `f`,
+          // and reading `n` here would look for the wrong file.
+          const name = /(?:const|let|var|function|class)\s+([a-zA-Z_$][\w$]*)/.exec(code)?.[1];
+          if (name === undefined) continue;
+
+          await run(session, code);
+          const present = readdirSync(dir).includes(`${name}.js`);
+          assert(
+            present === row.saves,
+            `the manual says \`${code}\` is ${row.saves ? "saved" : "NOT saved"}, but it was ${present ? "saved" : "not saved"}`,
+          );
+        }
+
+        // The claim about shadowing, which is the one a model is most likely to
+        // get wrong when reading code back.
+        await run(
+          session,
+          "const perCall = await Promise.resolve({ n: 1 });\nconst reader = (perCall) => perCall.n;",
+        );
+        assert(
+          readdirSync(dir).includes("reader.js"),
+          "a helper whose parameter shadows a per-call value was not saved, though the manual says it is",
+        );
+      } finally {
+        session.close();
+      }
+      pass("manual-is-true");
+    });
+  },
+
   async "run-semantics"() {
     await gate("run-semantics", async (dir) => {
       const session = await openSession({ env: envFor(dir) });
