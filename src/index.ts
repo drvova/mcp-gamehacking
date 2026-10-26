@@ -368,6 +368,98 @@ async function grepFile(
   });
 }
 
+/** What a scan of the source archives found, and how much of them it covered. */
+type ScanResult = {
+  matches: Array<{ skill: string; hits: { line: number; text: string }[] }>;
+  searched: number;
+  /** Archives that matched the scan's scope, counted UP FRONT. */
+  inScope: number;
+  /** True when the scan stopped early — by budget or by finding enough. */
+  partial: boolean;
+  seconds: number;
+};
+
+/**
+ * Scan the source archives for a pattern.
+ *
+ * ONE implementation, because the same defect appeared in three capabilities:
+ * a full pass is 17.8 GB and takes over a minute, which outlasts a host's request
+ * timeout, so a scan without a budget returns NOTHING and the caller cannot even
+ * tell whether the pattern exists. Every scan is bounded and reports its coverage.
+ */
+async function scanArchives(
+  pattern: RegExp,
+  options: {
+    /** Only archives whose name contains this. */
+    nameFilter?: string;
+    /** Stop after this many archives matched. */
+    maxMatches?: number;
+    /** Matches kept per archive. */
+    perFile?: number;
+    /** How long to scan before returning what it has. */
+    budgetMs: number;
+  },
+): Promise<ScanResult> {
+  const idx = await getIndex();
+  const started = Date.now();
+
+  // Counted up front, so the report can say how much of the CORPUS was covered.
+  // Counting as the loop goes would report the count reached, understating a
+  // large corpus and reading as if the scan were nearly complete.
+  const inScopeNames: string[] = [];
+  for (const [name, skill] of idx) {
+    if (!skill.hasSource) continue;
+    if (options.nameFilter && !name.toLowerCase().includes(options.nameFilter.toLowerCase())) {
+      continue;
+    }
+    inScopeNames.push(name);
+  }
+
+  const matches: ScanResult["matches"] = [];
+  let searched = 0;
+  let stopped = false;
+
+  for (const name of inScopeNames) {
+    if (Date.now() - started > options.budgetMs) {
+      stopped = true;
+      break;
+    }
+    const filePath = join(DIRS.skills, name, "source.txt");
+    const hits = await grepFile(filePath, pattern, options.perFile ?? 3);
+    searched++;
+    if (hits.length > 0) {
+      matches.push({ skill: name, hits });
+      if (options.maxMatches !== undefined && matches.length >= options.maxMatches) {
+        stopped = true;
+        break;
+      }
+    }
+  }
+
+  return {
+    matches,
+    searched,
+    inScope: inScopeNames.length,
+    partial: stopped && searched < inScopeNames.length,
+    seconds: (Date.now() - started) / 1000,
+  };
+}
+
+/** The sentence a partial scan must carry, so a partial answer is never read as whole. */
+function coverageNote(
+  result: ScanResult,
+  nameFilter: string | undefined,
+  budgetMs: number,
+): string {
+  if (!result.partial) return "";
+  const scope = nameFilter ? ` matching \`${nameFilter}\`` : "";
+  return (
+    `**Partial:** searched ${result.searched} of ${result.inScope}${scope} archives ` +
+    `(${result.seconds.toFixed(1)}s, budget ${budgetMs}ms). Raise \`budget_ms\`, or narrow with ` +
+    `\`filter\` to be sure of full coverage — a pattern absent from these results may still exist in the rest.`
+  );
+}
+
 // ============================================================
 // FORMATTERS
 // ============================================================
@@ -983,22 +1075,23 @@ capability(
 
 capability(
   "grep_sources",
-  "Full-text search across the source archives (17.8 GB). Streams through source.txt files matching a regex pattern — use it for offsets, function names, patterns, struct definitions. A full scan takes ~70s, so it returns partial results with a note after `budget_ms`; narrow with `filter` to be sure of full coverage.",
+  "Full-text search across the source archives (17.8 GB). Streams through source.txt files matching a regex pattern — use it for offsets, function names, patterns, struct definitions. A full scan takes over a minute, so it returns partial results with a note after `budget_ms`; narrow with `filter` to be sure of full coverage.",
   {
     pattern: z
       .string()
-      .min(2)
-      .describe(
-        "Regex pattern to search. Examples: '0x447D410', 'ProcessEvent', 'class APlayerController', 'CR3'",
-      ),
-    case_sensitive: z.boolean().default(false),
+      .describe("Regex pattern, e.g. '0x140001000', 'NTSTATUS.*Create', 'BoneMatrix'"),
+    case_sensitive: z.boolean().default(false).describe("Case-sensitive matching"),
     max_files: z
       .number()
       .min(1)
-      .max(100)
+      .max(200)
       .default(20)
-      .describe("Max files to search (stops after this many hits)"),
+      .describe("Stop after this many projects match"),
     max_matches_per_file: z.number().min(1).max(50).default(5).describe("Max matches per file"),
+    filter: z
+      .string()
+      .optional()
+      .describe("Only search projects whose name contains this — makes a complete scan fast"),
     budget_ms: z
       .number()
       .min(500)
@@ -1007,10 +1100,8 @@ capability(
       .describe(
         "How long to scan before returning what it has. A full scan is ~70s over 17.8 GB, which outlasts a host's request timeout — so this returns partial results with a note instead of timing out with nothing.",
       ),
-    filter: z.string().optional().describe("Only search skills whose name contains this substring"),
   },
   async ({ pattern, case_sensitive, max_files, max_matches_per_file, filter, budget_ms }) => {
-    const idx = await getIndex();
     let regex: RegExp;
     try {
       regex = new RegExp(pattern, case_sensitive ? "" : "i");
@@ -1018,56 +1109,25 @@ capability(
       return err(`Invalid regex: ${e}`);
     }
 
-    const results: Array<{ skill: string; matches: { line: number; text: string }[] }> = [];
-    let filesSearched = 0;
-    const started = Date.now();
+    const result = await scanArchives(regex, {
+      nameFilter: filter,
+      maxMatches: max_files,
+      perFile: max_matches_per_file,
+      budgetMs: budget_ms,
+    });
+    const note = coverageNote(result, filter, budget_ms);
 
-    // Counted up front: reporting "of 121" when the loop stopped at 121 would
-    // understate the corpus by thirty times and read as if the scan were nearly
-    // complete.
-    const candidates = [...idx.values()].filter((skill) => skill.hasSource).length;
-    const inScope = filter
-      ? [...idx.keys()].filter((name) => name.toLowerCase().includes(filter.toLowerCase())).length
-      : candidates;
-
-    for (const [name, skill] of idx) {
-      if (!skill.hasSource) continue;
-      if (filter && !name.toLowerCase().includes(filter.toLowerCase())) continue;
-
-      // The budget is checked BEFORE each file, so a scan always returns. The
-      // corpus is 17.8 GB and a full pass takes about 70s, which outlasts a
-      // host's request timeout — without this the caller gets nothing at all and
-      // cannot even tell whether the pattern exists.
-      if (Date.now() - started > budget_ms) break;
-
-      const filePath = join(DIRS.skills, name, "source.txt");
-      const matches = await grepFile(filePath, regex, max_matches_per_file);
-
-      if (matches.length > 0) {
-        results.push({ skill: name, matches });
-        if (results.length >= max_files) break;
-      }
-      filesSearched++;
-    }
-
-    const exhausted = filesSearched >= inScope;
-    const scope = filter ? ` matching \`${filter}\`` : "";
-    const note = exhausted
-      ? ""
-      : `**Partial:** searched ${filesSearched} of ${inScope}${scope} archives ` +
-        `(${((Date.now() - started) / 1000).toFixed(1)}s, budget ${budget_ms}ms). Raise \`budget_ms\`, ` +
-        `or narrow with \`filter\` to be sure of full coverage — a pattern absent from these results may still exist in the rest.`;
-
-    if (!results.length) {
+    if (!result.matches.length) {
       return err(
-        `No matches for "${pattern}" in ${filesSearched} of ${inScope}${scope} source archives.\n\n${note}`,
+        `No matches for "${pattern}" in ${result.searched} of ${result.inScope} archives.` +
+          (note ? `\n\n${note}` : ""),
       );
     }
 
-    let output = `# Grep: \`${pattern}\`\n\nFound in ${results.length} projects (searched ${filesSearched} of ${inScope}${scope}):\n\n${note}\n\n`;
-    for (const { skill, matches } of results) {
+    let output = `# Grep: \`${pattern}\`\n\nFound in ${result.matches.length} projects (searched ${result.searched} of ${result.inScope}):\n\n${note}\n\n`;
+    for (const { skill, hits } of result.matches) {
       output += `## ${skill}\n`;
-      for (const m of matches) {
+      for (const m of hits) {
         output += `  L${m.line}: ${m.text}\n`;
       }
       output += "\n";
@@ -1089,9 +1149,18 @@ capability(
       .string()
       .describe("Offset hex value (0x4F0), field name (BoneMatrix), or pattern (CompSpaceBones)"),
     max_results: z.number().min(1).max(50).default(15),
+    filter: z
+      .string()
+      .optional()
+      .describe("Only search projects whose name contains this — makes a complete scan fast"),
+    budget_ms: z
+      .number()
+      .min(500)
+      .max(120_000)
+      .default(20_000)
+      .describe("How long to scan before returning what it has, with a note saying so"),
   },
-  async ({ query, max_results }) => {
-    const idx = await getIndex();
+  async ({ query, max_results, filter, budget_ms }) => {
     let regex: RegExp;
     try {
       regex = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
@@ -1099,24 +1168,25 @@ capability(
       regex = new RegExp(query, "i");
     }
 
-    const results: Array<{ skill: string; matches: { line: number; text: string }[] }> = [];
+    const result = await scanArchives(regex, {
+      nameFilter: filter,
+      maxMatches: max_results,
+      perFile: 3,
+      budgetMs: budget_ms,
+    });
+    const note = coverageNote(result, filter, budget_ms);
 
-    for (const [name, skill] of idx) {
-      if (!skill.hasSource) continue;
-      const filePath = join(DIRS.skills, name, "source.txt");
-      const matches = await grepFile(filePath, regex, 3);
-      if (matches.length > 0) {
-        results.push({ skill: name, matches });
-        if (results.length >= max_results) break;
-      }
+    if (!result.matches.length) {
+      return err(
+        `No projects reference "${query}" in ${result.searched} of ${result.inScope} archives.` +
+          (note ? `\n\n${note}` : ""),
+      );
     }
 
-    if (!results.length) return err(`No projects reference "${query}".`);
-
-    let output = `# Offset Cross-Reference: \`${query}\`\n\nFound in ${results.length} projects:\n\n`;
-    for (const { skill, matches } of results) {
+    let output = `# Offset Cross-Reference: \`${query}\`\n\nFound in ${result.matches.length} projects (searched ${result.searched} of ${result.inScope}):\n\n${note}\n\n`;
+    for (const { skill, hits } of result.matches) {
       output += `### ${skill}\n`;
-      for (const m of matches) {
+      for (const m of hits) {
         output += `  L${m.line}: ${m.text}\n`;
       }
       output += "\n";
@@ -1456,30 +1526,40 @@ capability(
         "Function name to find. Examples: 'DriverEntry', 'ProcessEvent', 'WorldToScreen', 'GetBoneMatrix'",
       ),
     max_results: z.number().min(1).max(30).default(10),
+    filter: z
+      .string()
+      .optional()
+      .describe("Only search projects whose name contains this — makes a complete scan fast"),
+    budget_ms: z
+      .number()
+      .min(500)
+      .max(120_000)
+      .default(20_000)
+      .describe("How long to scan before returning what it has, with a note saying so"),
   },
-  async ({ function_name, max_results }) => {
-    const idx = await getIndex();
+  async ({ function_name, max_results, filter, budget_ms }) => {
     const escaped = function_name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const regex = new RegExp(`(?:^|\\s|\\*|>)${escaped}\\s*\\(`, "i");
 
-    const results: Array<{ skill: string; matches: { line: number; text: string }[] }> = [];
+    const result = await scanArchives(regex, {
+      nameFilter: filter,
+      maxMatches: max_results,
+      perFile: 3,
+      budgetMs: budget_ms,
+    });
+    const note = coverageNote(result, filter, budget_ms);
 
-    for (const [name, skill] of idx) {
-      if (!skill.hasSource) continue;
-      const filePath = join(DIRS.skills, name, "source.txt");
-      const matches = await grepFile(filePath, regex, 3);
-      if (matches.length > 0) {
-        results.push({ skill: name, matches });
-        if (results.length >= max_results) break;
-      }
+    if (!result.matches.length) {
+      return err(
+        `No definitions found for "${function_name}" in ${result.searched} of ${result.inScope} archives.` +
+          (note ? `\n\n${note}` : ""),
+      );
     }
 
-    if (!results.length) return err(`No definitions found for "${function_name}".`);
-
-    let output = `# Function: ${function_name}\n\nFound in ${results.length} projects:\n\n`;
-    for (const { skill, matches } of results) {
+    let output = `# Function: ${function_name}\n\nFound in ${result.matches.length} projects (searched ${result.searched} of ${result.inScope}):\n\n${note}\n\n`;
+    for (const { skill, hits } of result.matches) {
       output += `### ${skill}\n`;
-      for (const m of matches) {
+      for (const m of hits) {
         output += `  L${m.line}: ${m.text}\n`;
       }
       output += "\n";

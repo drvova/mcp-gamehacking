@@ -75,9 +75,12 @@ from inside that namespace rather than advertised as verbs.
 
 ## A long scan returns, and says how much it covered
 
-- [x] G24: A full-archive scan respects a time budget and returns partial results with an honest note — instead of outlasting the host's request timeout and returning nothing — and the note reports the CORPUS size, not the count it reached, while a narrowed search is complete and says so by not claiming to be partial
+- [x] G24: EVERY capability that scans the archive respects a time budget and returns partial results with an honest note — instead of outlasting the host's request timeout and returning nothing — and the note reports the CORPUS size, not the count it reached, while a narrowed search is complete and says so by not claiming to be partial. The same defect was in three capabilities (`grep_sources`, `find_offset`, `find_function`), so they now share one scanner
   CHECK: node tools/checks/check.mjs scan-budget
   EXPECT: gate-passed:scan-budget
+  NOTE: gate calls have a 90s deadline. An earlier version of this gate HUNG on
+  the unbounded scan for two minutes with no verdict — worse than a failure,
+  because it names nothing. It now fails with the offending call quoted.
 
 ## Calls do not step on each other
 
@@ -182,6 +185,7 @@ from inside that namespace rather than advertised as verbs.
 | G16 | classify definitions without checking what they depend on | `a pipeline did not run in source order: While defining: rows is not defined` |
 | G17 | save a declaration whose initializer calls something | `a computed value was persisted as a tool: after.js, before.js, doubleAll.js` |
 | G24 | remove the scan budget | `the scan ran 44994ms with a 1500ms budget` (the host timeout) |
+| G24 | leave `find_offset` unbounded | `no answer within 90s: await find_offset({ query: '0x140001000', budget_ms: 1500 })` |
 | G24 | count coverage as it goes instead of up front | `the corpus size reported is wrong: 113` |
 | G23 | use `instanceof Error` across the realm boundary | `an Error was not described: Thrown: {}` |
 | G23 | read `.name`/`.message` off any thrown value | `a thrown string was not described: undefined: undefined` |

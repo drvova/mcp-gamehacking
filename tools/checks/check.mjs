@@ -210,16 +210,41 @@ function toolNames(frame) {
   return (frame?.result?.tools ?? []).map((tool) => tool.name);
 }
 
-/** Run code through the tool. */
+/**
+ * Run code through the tool, with a deadline.
+ *
+ * A gate that hangs tells you less than one that fails: an unbounded archive scan
+ * made this battery sit for two minutes with no verdict at all. The deadline turns
+ * that into a named failure.
+ */
+const RUN_TIMEOUT_MS = 90_000;
+
 async function run(session, code, extra = {}) {
-  return textOf(
-    await session.request({
-      jsonrpc: "2.0",
-      id: Math.floor(Math.random() * 1e9),
-      method: "tools/call",
-      params: { name: TOOL, arguments: { code, ...extra } },
-    }),
-  );
+  const answered = session.request({
+    jsonrpc: "2.0",
+    id: Math.floor(Math.random() * 1e9),
+    method: "tools/call",
+    params: { name: TOOL, arguments: { code, ...extra } },
+  });
+
+  let timer;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new Error(
+            `no answer within ${RUN_TIMEOUT_MS / 1000}s: ${code.split("\n")[0].slice(0, 80)}`,
+          ),
+        ),
+      RUN_TIMEOUT_MS,
+    );
+  });
+
+  try {
+    return textOf(await Promise.race([answered, deadline]));
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function callTool(session, args) {
@@ -1157,6 +1182,47 @@ missing.length === 0 ? "all reachable" : "missing: " + missing.join(", ")`,
           /Found in \d+ project/.test(narrowed),
           `a narrowed scan found nothing: ${narrowed.slice(0, 120)}`,
         );
+
+        // EVERY scanner needs this, not just the first: the same defect was in
+        // three capabilities, each of which would time out with nothing.
+        const scanners = [
+          {
+            name: "find_offset",
+            bounded: "await find_offset({ query: '0x140001000', budget_ms: 1500 })",
+            narrowed:
+              "await find_offset({ query: 'iqvw64e', filter: 'kdmapper', budget_ms: 8000 })",
+            expect: /iqvw64e/,
+          },
+          {
+            name: "find_function",
+            bounded: "await find_function({ function_name: 'DriverEntry', budget_ms: 1500 })",
+            narrowed:
+              "await find_function({ function_name: 'MapDriver', filter: 'kdmapper', budget_ms: 8000 })",
+            expect: /MapDriver/,
+          },
+        ];
+        for (const scanner of scanners) {
+          const scannerStart = Date.now();
+          const text = await run(session, scanner.bounded);
+          const scannerElapsed = Date.now() - scannerStart;
+          assert(
+            scannerElapsed < 15_000,
+            `${scanner.name} ran ${scannerElapsed}ms with a 1500ms budget`,
+          );
+          assert(
+            /of \d+ archives/.test(text),
+            `${scanner.name} does not report its coverage: ${text.slice(0, 140)}`,
+          );
+          const corpus = Number(/of (\d+) archives/.exec(text)?.[1] ?? 0);
+          assert(corpus > 3000, `${scanner.name} reported a wrong corpus size: ${corpus}`);
+
+          const narrow = await run(session, scanner.narrowed);
+          assert(!/Partial/.test(narrow), `${scanner.name} claimed to be partial when narrowed`);
+          assert(
+            scanner.expect.test(narrow),
+            `${scanner.name} found nothing when narrowed: ${narrow.slice(0, 120)}`,
+          );
+        }
       } finally {
         session.close();
       }
