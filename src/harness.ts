@@ -75,6 +75,15 @@ export type Doc = {
    * Ranged and lazy on purpose: a source dump can be 100 MB, so reading one in
    * full to look at ten lines would be the wrong shape for the question.
    */
+  /**
+   * A range of source lines, `from` through `to` INCLUSIVE, numbered the way an
+   * editor numbers them: the first line is 1.
+   *
+   * It has to agree with `grepSource`, which reports `492: text` for the 492nd
+   * line. It used to be 0-based while grepSource was 1-based, so feeding a line
+   * number from one into the other silently returned the WRONG LINE — the worst
+   * kind of defect, because both answers look plausible.
+   */
   sourceLines: (from?: number, to?: number) => Promise<string[]>;
   /**
    * Search the source dump, streaming it line by line.
@@ -917,13 +926,18 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
         });
         return { bytes: info.size, lines };
       },
-      async sourceLines(from = 0, to = 200) {
+      async sourceLines(from = 1, to = 200) {
         if (sourcePath === null) {
           throw new Error(`${name} has no source dump; only its description is available.`);
         }
+        // 1-based INCLUSIVE, so `sourceLines(492, 492)` is the line grepSource
+        // reports as 492. The stream is 0-based internally, hence the -1.
+        const first = Math.max(1, Math.trunc(from));
+        const last = Math.max(first, Math.trunc(to));
         const wanted: string[] = [];
         await streamLines(sourcePath, (line, index) => {
-          if (index >= from && index < to) wanted.push(line);
+          const lineNo = index + 1;
+          if (lineNo >= first && lineNo <= last) wanted.push(line);
         });
         return wanted;
       },
@@ -1152,7 +1166,9 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
       "  d.text / d.lines / d.grep(/re/)               the description",
       "  d.hasSource                                   whether a source dump exists",
       "  await d.sourceSize()                          { bytes, lines } — check before reading",
-      "  await d.sourceLines(0, 200)                   a line range (lazy: a dump can be 100 MB)",
+      "  await d.sourceLines(1, 200)                   a line range, 1-based inclusive, the",
+      "                                             same numbering grepSource reports —",
+      "                                             (lazy: a dump can be 100 MB)",
       "  await d.grepSource(/0x140001000/)             search it, streamed, with line numbers",
       "  describe(search_skills)                       one function's arguments and doc",
       "  describe(doc)                                 an object's public members",

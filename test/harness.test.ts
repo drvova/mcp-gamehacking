@@ -332,6 +332,39 @@ describe("one long-lived namespace", () => {
     expect(readdirSync(harnessDir)).toContain("rows.js");
   });
 
+  it("numbers source lines the way grepSource does", async () => {
+    // Two APIs report positions in the same file, so they must agree. They did
+    // not: grepSource reported `492: text` (1-based) while sourceLines took
+    // 0-based indices, so feeding one into the other returned the WRONG LINE —
+    // silently, because both answers look plausible.
+    const output = await run(
+      [
+        "const d = await open('ags-eddeeh-kdmapper');",
+        "const hits = await d.grepSource(/iqvw64e/, 2);",
+        "const out = [];",
+        "for (const hit of hits) {",
+        "  const at = hit.indexOf(': ');",
+        "  if (at < 0) continue;",
+        "  const lineNo = Number(hit.slice(0, at));",
+        "  const text = hit.slice(at + 2);",
+        "  const got = (await d.sourceLines(lineNo, lineNo))[0] ?? '';",
+        "  out.push(got.trim() === text.trim() ? 'agree' : 'DISAGREE');",
+        "}",
+        "out.join(',')",
+      ].join("\n"),
+    );
+
+    expect(output).toContain("agree");
+    expect(output).not.toContain("DISAGREE");
+
+    // Editor numbering: line 1 is the first line, and a range is inclusive.
+    const first = await run("(await (await open('ags-eddeeh-kdmapper')).sourceLines(1, 1))[0]");
+    expect(first).toMatch(/Project Path|^#/);
+
+    const span = await run("(await (await open('ags-eddeeh-kdmapper')).sourceLines(1, 3)).length");
+    expect(span).toBe("3");
+  });
+
   it("reports a syntax error without running anything", async () => {
     const failed = await run("const = ;");
 

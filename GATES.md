@@ -73,6 +73,12 @@ from inside that namespace rather than advertised as verbs.
   CHECK: node tools/checks/check.mjs errors-are-described
   EXPECT: gate-passed:errors-are-described
 
+## Two APIs numbering the same file agree
+
+- [x] G28: `grepSource` and `sourceLines` number lines the same way — a line number taken from one and passed to the other returns the SAME line. They did not: `grepSource` reported `492: text` (1-based, editor style) while `sourceLines` took 0-based indices, so the natural move returned the wrong line SILENTLY, with both answers looking plausible
+  CHECK: node tools/checks/check.mjs line-numbers-agree
+  EXPECT: gate-passed:line-numbers-agree
+
 ## The ledger and the battery agree
 
 - [x] G27: Every `CHECK` in this ledger names a gate that exists, and every gate has a ledger entry — an entry naming a check that does not exist reads as proof while proving nothing, and a gate with no entry is invisible to anyone reading the ledger
@@ -202,6 +208,7 @@ from inside that namespace rather than advertised as verbs.
 | G15 | report no source for a skill that has one | `sourceSize reported nothing useful: null` |
 | G16 | classify definitions without checking what they depend on | `a pipeline did not run in source order: While defining: rows is not defined` |
 | G17 | save a declaration whose initializer calls something | `a computed value was persisted as a tool: after.js, before.js, doubleAll.js` |
+| G28 | restore 0-based half-open `sourceLines` | `grepSource and sourceLines disagree about which line holds a match: 492:DISAGREE 1508:DISAGREE 1535:DISAGREE` |
 | G27 | add a gate without a ledger entry | `these gates have no ledger entry: ledger-matches-battery` |
 | G27 | name a check in the ledger that does not exist | `the ledger names gates that do not exist: manual-typo` |
 | G26 | the README says `name_a`/`name_b` (the real names) | `the README calls compare_projects({ name_a: ... }) but compare_projects has no such parameter — it takes compare_projects({project_a, project_b, include_source})` |

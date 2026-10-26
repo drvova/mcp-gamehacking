@@ -1362,6 +1362,55 @@ missing.length === 0 ? "all reachable" : "missing: " + missing.join(", ")`,
     });
   },
 
+  async "line-numbers-agree"() {
+    if (!archivePresent()) skip("line-numbers-agree", "archive data absent");
+    await gate("line-numbers-agree", async (dir) => {
+      // Two APIs report positions in the SAME file, so they must number lines the
+      // same way. They did not: grepSource reported `492: text` (1-based, editor
+      // style) while sourceLines took 0-based indices, so feeding a line number
+      // from one into the other returned the WRONG LINE — silently, because both
+      // answers look plausible.
+      const session = await openSession({ env: envFor(dir) });
+      try {
+        const output = await run(
+          session,
+          [
+            "const d = await open('ags-eddeeh-kdmapper');",
+            "const hits = await d.grepSource(/iqvw64e/, 3);",
+            "const out = [];",
+            "for (const hit of hits) {",
+            "  const at = hit.indexOf(': ');",
+            "  if (at < 0) continue;",
+            "  const lineNo = Number(hit.slice(0, at));",
+            "  const text = hit.slice(at + 2);",
+            "  const got = (await d.sourceLines(lineNo, lineNo))[0] ?? '';",
+            "  out.push(`${lineNo}:${got.trim() === text.trim() ? 'agree' : 'DISAGREE'}`);",
+            "}",
+            "out.join(' ')",
+          ].join("\n"),
+        );
+        assert(
+          !/DISAGREE/.test(output),
+          `grepSource and sourceLines disagree about which line holds a match: ${output}`,
+        );
+        assert(/agree/.test(output), `the cross-check produced no agreeing line: ${output}`);
+
+        // And the numbering is editor-style: line 1 is the first line.
+        const first = await run(
+          session,
+          "(await (await open('ags-eddeeh-kdmapper')).sourceLines(1, 1))[0]",
+        );
+        assert(
+          /Project Path|^#/.test(first.trim()),
+          `line 1 is not the first line of the document: ${first.slice(0, 60)}`,
+        );
+      } finally {
+        session.close();
+      }
+      pass("line-numbers-agree");
+    });
+  },
+
   async "index-stability"() {
     if (!archivePresent()) skip("index-stability", "archive data absent");
     await gate("index-stability", async (dir) => {
