@@ -266,6 +266,28 @@ describe("one long-lived namespace", () => {
     expect(await run("const sql = { run: (p) => p[0] };\nsql.run`select`")).toBe("select");
   });
 
+  it("describes a thrown value, whatever it is", async () => {
+    // `throw 'something'` is legal and common. Reading `.name`/`.message` off it
+    // produced the useless "undefined: undefined".
+    expect(await run("throw 'plain string'")).toMatch(/Thrown: plain string/);
+    expect(await run("throw 42")).toMatch(/Thrown: 42/);
+    expect(await run("throw undefined")).toMatch(/Thrown: undefined/);
+    expect(await run("throw null")).toMatch(/Thrown: null/);
+
+    // A real Error reports its name and message — duck-typed, because code runs
+    // in a `vm` context whose Error is a DIFFERENT realm's constructor, so an
+    // `instanceof` check fails and the error rendered as "Thrown: {}".
+    expect(await run("throw new Error('real')")).toMatch(/Error: real/);
+    expect(await run("null.x")).toMatch(/TypeError:/);
+    expect(await run("nope")).toMatch(/ReferenceError:/);
+
+    // Including a custom subclass, and one thrown while defining.
+    const custom = await run(
+      "class MyErr extends Error { constructor(m) { super(m); this.name = 'MyErr'; } }\nthrow new MyErr('custom')",
+    );
+    expect(custom).toMatch(/MyErr: custom/);
+  });
+
   it("reports a syntax error without running anything", async () => {
     const failed = await run("const = ;");
 

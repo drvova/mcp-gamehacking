@@ -619,6 +619,29 @@ function isFunctionLike(node: unknown): boolean {
   return type === "ArrowFunctionExpression" || type === "FunctionExpression";
 }
 
+/**
+ * Describe a thrown value.
+ *
+ * `throw 'something'` is legal and common, and reading `.name`/`.message` off it
+ * produced the useless "undefined: undefined" — so a non-Error is rendered as the
+ * value it is.
+ */
+function describeThrown(error: unknown): string {
+  // Duck-typed, not `instanceof`: code runs in a `vm` context with its own realm,
+  // so an Error created there is NOT an instance of this realm's `Error` — the
+  // check silently failed and a real error rendered as "Thrown: {}".
+  if (error !== null && typeof error === "object") {
+    const record = error as { name?: unknown; message?: unknown };
+    const name = typeof record.name === "string" && record.name ? record.name : "Error";
+    const message = typeof record.message === "string" ? record.message : "";
+    if (typeof record.name === "string" || typeof record.message === "string") {
+      return message ? `${name}: ${message}` : name;
+    }
+  }
+  if (error === undefined) return "Thrown: undefined";
+  return `Thrown: ${render(error)}`;
+}
+
 /** Render a value for the model: strings as-is, everything else as JSON. */
 function render(value: unknown): string {
   if (value === undefined) return "";
@@ -1077,7 +1100,9 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
       "## Writing code",
       "",
       "  - `await` works. The project's functions are async; call them normally.",
-      "  - A trailing expression is returned, and so is anything assigned to `result`.",
+      "  - A trailing EXPRESSION is returned, and so is anything assigned to `result`.",
+      "    A trailing BLOCK (`try`, `if`, `for`) returns nothing — put the value in a",
+      "    final expression, or assign it to `result`.",
       "  - `console.log` is captured and returned with the value.",
       "  - Redefining a name is fine; refining a helper is the point.",
       "  - Standard globals are here: timers, `fetch`, `URL`, `TextEncoder`/`Decoder`,",
@@ -1246,7 +1271,7 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
         vm.runInContext(definition.source, context);
       }
     } catch (error) {
-      return `While defining: ${(error as Error).message}\n\nNothing was saved.`;
+      return `While defining: ${describeThrown(error)}\n\nNothing was saved.`;
     }
 
     let value: unknown;
@@ -1273,16 +1298,10 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
         // earlier in THIS call is not in the context.
         value = await vm.runInContext(`(async () => {\n${body}\n})()`, context);
       } catch (error) {
-        const failure = error as Error;
         // Sampled here too: a call that failed after allocating still shows what
         // it allocated.
         peakHeap = Math.max(peakHeap, process.memoryUsage().heapUsed);
-        return [
-          ...captured,
-          `${failure.name}: ${failure.message}`,
-          "",
-          "Nothing after the failure ran.",
-        ]
+        return [...captured, describeThrown(error), "", "Nothing after the failure ran."]
           .filter((part) => part !== "")
           .join("\n");
       }

@@ -632,6 +632,54 @@ const gates = {
     });
   },
 
+  async "errors-are-described"() {
+    await gate("errors-are-described", async (dir) => {
+      const session = await openSession({ env: envFor(dir) });
+      try {
+        // A thrown non-Error is legal and common, and reading `.name`/`.message`
+        // off it produced "undefined: undefined" — a message that says nothing.
+        const string = await run(session, "throw 'plain string'");
+        assert(
+          /Thrown: plain string/.test(string),
+          `a thrown string was not described: ${string.slice(0, 60)}`,
+        );
+        const number = await run(session, "throw 42");
+        assert(
+          /Thrown: 42/.test(number),
+          `a thrown number was not described: ${number.slice(0, 60)}`,
+        );
+
+        // A real Error must report its name and message. The check is duck-typed
+        // because the vm context has its own realm: an `instanceof Error` from
+        // this realm is FALSE for an error made there, which silently rendered a
+        // real error as "Thrown: {}".
+        const real = await run(session, "throw new Error('real')");
+        assert(/Error: real/.test(real), `an Error was not described: ${real.slice(0, 60)}`);
+        assert(!/Thrown: \{\}/.test(real), "an Error was rendered as an opaque object");
+
+        const type = await run(session, "null.x");
+        assert(/TypeError:/.test(type), `a TypeError was not described: ${type.slice(0, 60)}`);
+        const reference = await run(session, "nope");
+        assert(
+          /ReferenceError:/.test(reference),
+          `a ReferenceError was not described: ${reference.slice(0, 60)}`,
+        );
+
+        const custom = await run(
+          session,
+          "class MyErr extends Error { constructor(m) { super(m); this.name = 'MyErr'; } }\nthrow new MyErr('custom')",
+        );
+        assert(
+          /MyErr: custom/.test(custom),
+          `a custom error was not described: ${custom.slice(0, 60)}`,
+        );
+      } finally {
+        session.close();
+      }
+      pass("errors-are-described");
+    });
+  },
+
   async "run-semantics"() {
     await gate("run-semantics", async (dir) => {
       const session = await openSession({ env: envFor(dir) });

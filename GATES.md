@@ -67,6 +67,12 @@ from inside that namespace rather than advertised as verbs.
   CHECK: node tools/checks/check.mjs helper-identity
   EXPECT: gate-passed:helper-identity
 
+## A failure says what failed
+
+- [x] G23: Every thrown value is described — a thrown string, number, `undefined` and `null` report as themselves, a real `Error` reports its name and message, and a custom subclass reports its own name — which requires duck-typing, because code runs in a `vm` realm whose `Error` is a different constructor and an `instanceof` check silently renders a real error as an opaque object
+  CHECK: node tools/checks/check.mjs errors-are-described
+  EXPECT: gate-passed:errors-are-described
+
 ## Calls do not step on each other
 
 - [x] G22: Concurrent calls each get their own output — the namespace is one shared mutable thing, so calls are serialized — and the context has the globals a model expects (timers, `fetch`, `URL`, encoding, `crypto`, `Buffer`) while `process`, `require` and `module` stay unreachable
@@ -169,6 +175,8 @@ from inside that namespace rather than advertised as verbs.
 | G15 | report no source for a skill that has one | `sourceSize reported nothing useful: null` |
 | G16 | classify definitions without checking what they depend on | `a pipeline did not run in source order: While defining: rows is not defined` |
 | G17 | save a declaration whose initializer calls something | `a computed value was persisted as a tool: after.js, before.js, doubleAll.js` |
+| G23 | use `instanceof Error` across the realm boundary | `an Error was not described: Thrown: {}` |
+| G23 | read `.name`/`.message` off any thrown value | `a thrown string was not described: undefined: undefined` |
 | G22 | remove the call queue | `call A lost its own start line: start-D` |
 | G22 | seed `process` into the context | `the server's own environment is reachable: process` |
 | G22 | seed no globals | `call A lost its own end line` (no `setTimeout`) |
