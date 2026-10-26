@@ -1319,6 +1319,49 @@ missing.length === 0 ? "all reachable" : "missing: " + missing.join(", ")`,
     });
   },
 
+  async "ledger-matches-battery"() {
+    await gate("ledger-matches-battery", async () => {
+      // The ledger is the index of what has been proven. An entry naming a check
+      // that does not exist reads as proof while proving nothing, and a gate with
+      // no entry is invisible to anyone reading the ledger — so the two are
+      // compared directly rather than trusted.
+      const ledger = readFileSync(join(ROOT, "GATES.md"), "utf8");
+      const battery = readFileSync(join(ROOT, "tools", "checks", "check.mjs"), "utf8");
+
+      const documented = new Set(
+        [...ledger.matchAll(/CHECK: node tools\/checks\/check\.mjs ([a-z0-9-]+)/g)].map(
+          (m) => m[1],
+        ),
+      );
+
+      // The gate table: `const gates = {` up to its closing brace.
+      const table = battery.slice(battery.indexOf("const gates = {"));
+      const implemented = new Set(
+        [
+          ...table
+            .slice(0, table.indexOf("\n};"))
+            .matchAll(/^\s{2}(?:async )?"?([a-z][a-z0-9-]*)"?\s*[:(]/gm),
+        ].map((m) => m[1]),
+      );
+
+      assert(documented.size > 10, `only ${documented.size} gates documented`);
+      assert(implemented.size > 10, `only ${implemented.size} gates implemented`);
+
+      const missing = [...documented].filter((name) => !implemented.has(name)).sort();
+      const undocumented = [...implemented].filter((name) => !documented.has(name)).sort();
+
+      assert(
+        missing.length === 0,
+        `the ledger names gates that do not exist: ${missing.join(", ")}`,
+      );
+      assert(
+        undocumented.length === 0,
+        `these gates have no ledger entry: ${undocumented.join(", ")}`,
+      );
+      pass("ledger-matches-battery");
+    });
+  },
+
   async "index-stability"() {
     if (!archivePresent()) skip("index-stability", "archive data absent");
     await gate("index-stability", async (dir) => {
