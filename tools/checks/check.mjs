@@ -1112,6 +1112,58 @@ missing.length === 0 ? "all reachable" : "missing: " + missing.join(", ")`,
     });
   },
 
+  async "scan-budget"() {
+    if (!archivePresent()) skip("scan-budget", "archive data absent");
+    await gate("scan-budget", async (dir) => {
+      const session = await openSession({ env: envFor(dir) });
+      try {
+        // A full scan of the archive is 17.8 GB and takes over a minute, which
+        // outlasts a host's request timeout. Without a budget the caller gets a
+        // timeout and NOTHING — it cannot even tell whether the pattern exists.
+        const started = Date.now();
+        const rare = await run(
+          session,
+          "await grep_sources({ pattern: 'BdApiUtil64xyz', budget_ms: 1500 })",
+        );
+        const elapsed = Date.now() - started;
+
+        // Returned rather than hung, inside the budget plus a margin.
+        assert(elapsed < 12_000, `the scan ran ${elapsed}ms with a 1500ms budget`);
+
+        // And it says plainly that the answer is partial, naming how much was
+        // covered — a partial result read as complete is the dangerous case.
+        assert(
+          /Partial/.test(rare),
+          `a budgeted scan did not say it was partial: ${rare.slice(0, 120)}`,
+        );
+        assert(
+          /of \d+ archives/.test(rare),
+          `the partial note does not say how much was covered: ${rare.slice(0, 160)}`,
+        );
+
+        // The coverage count must be the CORPUS size, not the number reached —
+        // reporting "of 121" when the loop stopped at 121 understated it by 30x.
+        const covered = Number(/searched (\d+) of (\d+)/.exec(rare)?.[2] ?? 0);
+        assert(covered > 3000, `the corpus size reported is wrong: ${covered}`);
+
+        // A narrowed search is fast and complete, and says so by NOT claiming to
+        // be partial.
+        const narrowed = await run(
+          session,
+          "await grep_sources({ pattern: 'iqvw64e', filter: 'kdmapper', budget_ms: 8000 })",
+        );
+        assert(!/Partial/.test(narrowed), `a complete narrowed scan claimed to be partial`);
+        assert(
+          /Found in \d+ project/.test(narrowed),
+          `a narrowed scan found nothing: ${narrowed.slice(0, 120)}`,
+        );
+      } finally {
+        session.close();
+      }
+      pass("scan-budget");
+    });
+  },
+
   async "index-stability"() {
     if (!archivePresent()) skip("index-stability", "archive data absent");
     await gate("index-stability", async (dir) => {

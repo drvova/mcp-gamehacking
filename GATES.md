@@ -73,6 +73,12 @@ from inside that namespace rather than advertised as verbs.
   CHECK: node tools/checks/check.mjs errors-are-described
   EXPECT: gate-passed:errors-are-described
 
+## A long scan returns, and says how much it covered
+
+- [x] G24: A full-archive scan respects a time budget and returns partial results with an honest note — instead of outlasting the host's request timeout and returning nothing — and the note reports the CORPUS size, not the count it reached, while a narrowed search is complete and says so by not claiming to be partial
+  CHECK: node tools/checks/check.mjs scan-budget
+  EXPECT: gate-passed:scan-budget
+
 ## Calls do not step on each other
 
 - [x] G22: Concurrent calls each get their own output — the namespace is one shared mutable thing, so calls are serialized — and the context has the globals a model expects (timers, `fetch`, `URL`, encoding, `crypto`, `Buffer`) while `process`, `require` and `module` stay unreachable
@@ -175,6 +181,8 @@ from inside that namespace rather than advertised as verbs.
 | G15 | report no source for a skill that has one | `sourceSize reported nothing useful: null` |
 | G16 | classify definitions without checking what they depend on | `a pipeline did not run in source order: While defining: rows is not defined` |
 | G17 | save a declaration whose initializer calls something | `a computed value was persisted as a tool: after.js, before.js, doubleAll.js` |
+| G24 | remove the scan budget | `the scan ran 44994ms with a 1500ms budget` (the host timeout) |
+| G24 | count coverage as it goes instead of up front | `the corpus size reported is wrong: 113` |
 | G23 | use `instanceof Error` across the realm boundary | `an Error was not described: Thrown: {}` |
 | G23 | read `.name`/`.message` off any thrown value | `a thrown string was not described: undefined: undefined` |
 | G22 | remove the call queue | `call A lost its own start line: start-D` |
