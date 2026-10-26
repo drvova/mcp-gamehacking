@@ -1080,6 +1080,10 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
       "  - A trailing expression is returned, and so is anything assigned to `result`.",
       "  - `console.log` is captured and returned with the value.",
       "  - Redefining a name is fine; refining a helper is the point.",
+      "  - Standard globals are here: timers, `fetch`, `URL`, `TextEncoder`/`Decoder`,",
+      "    `atob`/`btoa`, `crypto`, `structuredClone`, `Buffer`. `process`, `require`",
+      "    and `module` are NOT — they reach the server, not the sandbox.",
+      "  - Calls run one at a time, so two calls never see each other's output.",
       "  - End a statement with `;` when the NEXT line starts with `\\``, `(` or `[`.",
       "    JavaScript joins those lines otherwise (a template becomes a TAG, so",
       "    `f()\\n\\`x\\`` tries to call f()'s result). Other lines do not need one.",
@@ -1120,8 +1124,19 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
 
   // --------------------------------------------------------------------- run
 
+  /**
+   * The queue that makes calls run one at a time.
+   *
+   * The namespace is a single shared mutable thing — one context, one set of
+   * bindings — so two calls executing concurrently would interleave their
+   * captured output and their working objects. A host is free to pipeline
+   * requests, so this is not hypothetical; serializing gives each call a
+   * correct, isolated result.
+   */
+  let queue: Promise<void> = Promise.resolve();
+
   /** Execute one call. Returns the text the caller sees. */
-  const run = async (code: string, sessionId = "", strings: Record<string, unknown> = {}) => {
+  const execute = async (code: string, sessionId = "", strings: Record<string, unknown> = {}) => {
     if (code.trim() === "") return manual();
 
     const session = sessionFor(sessionId);
@@ -1336,6 +1351,38 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
   seed("result", undefined);
   seed("doc", undefined);
   seed("docs", []);
+
+  // The standard globals a model expects. A `vm` context starts almost empty —
+  // no timers, no URL, no text encoding — and a model that reaches for one of
+  // them gets "is not defined" for something it has every reason to expect.
+  // Deliberately NOT here: `process`, `require`, `module` — those reach the
+  // server's own environment and module graph, which is a different thing from
+  // running code with its authority.
+  const globals: Record<string, unknown> = {
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+    setImmediate,
+    clearImmediate,
+    queueMicrotask,
+    URL,
+    URLSearchParams,
+    TextEncoder,
+    TextDecoder,
+    structuredClone,
+    AbortController,
+    AbortSignal,
+    fetch,
+    performance,
+    crypto: globalThis.crypto,
+    atob,
+    btoa,
+    Buffer,
+  };
+  for (const [name, value] of Object.entries(globals)) {
+    if (value !== undefined) seed(name, value);
+  }
   // The harness's own footprint. Useful when working with a 100 MB source dump —
   // and it is what makes "this read was lazy" an observable fact rather than a
   // claim about the code.
@@ -1354,6 +1401,24 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
     return undefined;
   };
   seed("console", { log: record, error: record, warn: record, info: record, debug: record });
+
+  const run = async (
+    code: string,
+    sessionId = "",
+    strings: Record<string, unknown> = {},
+  ): Promise<string> => {
+    const previous = queue;
+    let release: () => void = () => {};
+    queue = new Promise((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await execute(code, sessionId, strings);
+    } finally {
+      release();
+    }
+  };
 
   return { run, manual, kept, forget, load, dir };
 }

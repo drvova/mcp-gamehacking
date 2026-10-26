@@ -67,6 +67,12 @@ from inside that namespace rather than advertised as verbs.
   CHECK: node tools/checks/check.mjs helper-identity
   EXPECT: gate-passed:helper-identity
 
+## Calls do not step on each other
+
+- [x] G22: Concurrent calls each get their own output — the namespace is one shared mutable thing, so calls are serialized — and the context has the globals a model expects (timers, `fetch`, `URL`, encoding, `crypto`, `Buffer`) while `process`, `require` and `module` stay unreachable
+  CHECK: node tools/checks/check.mjs calls-serialized
+  EXPECT: gate-passed:calls-serialized
+
 ## A joined line is explained, not left to confuse
 
 - [x] G21: A template literal joined to the line above by automatic semicolon insertion is reported as what it is — naming the line and the fix — while a real template tag (a name or member expression) still runs and a semicolon fixes the code
@@ -163,6 +169,9 @@ from inside that namespace rather than advertised as verbs.
 | G15 | report no source for a skill that has one | `sourceSize reported nothing useful: null` |
 | G16 | classify definitions without checking what they depend on | `a pipeline did not run in source order: While defining: rows is not defined` |
 | G17 | save a declaration whose initializer calls something | `a computed value was persisted as a tool: after.js, before.js, doubleAll.js` |
+| G22 | remove the call queue | `call A lost its own start line: start-D` |
+| G22 | seed `process` into the context | `the server's own environment is reachable: process` |
+| G22 | seed no globals | `call A lost its own end line` (no `setTimeout`) |
 | G21 | drop the joined-line check | `the accident was not explained: TypeError: forget(...) is not a function` |
 | G21 | reject every template tag, not just the accident | `a real template tag broke: Line 2: a template literal on the line after code is joined to it,` |
 | G20 | print `let` as saved in the manual | `the manual says \`let total = 0\` is saved, but it was not saved` |

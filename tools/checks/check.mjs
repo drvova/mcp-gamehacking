@@ -825,6 +825,73 @@ const gates = {
     });
   },
 
+  async "calls-serialized"() {
+    await gate("calls-serialized", async (dir) => {
+      const session = await openSession({ env: envFor(dir) });
+      try {
+        // The namespace is one shared mutable thing, so two calls at once would
+        // interleave their captured output — and a host is free to pipeline.
+        // Measured before the queue existed: 3 of 4 concurrent calls returned
+        // another call's output.
+        const tags = ["A", "B", "C", "D"];
+        const responses = await Promise.all(
+          tags.map((tag, index) =>
+            session.request({
+              jsonrpc: "2.0",
+              id: 500 + index,
+              method: "tools/call",
+              params: {
+                name: TOOL,
+                arguments: {
+                  code:
+                    `console.log('start-${tag}');\n` +
+                    `await new Promise((r) => setTimeout(r, ${30 - index * 6}));\n` +
+                    `console.log('end-${tag}');\n` +
+                    `'value-${tag}'`,
+                  session_id: `concurrent-${index}`,
+                },
+              },
+            }),
+          ),
+        );
+
+        responses.forEach((response, index) => {
+          const tag = tags[index];
+          const text = textOf(response);
+          assert(
+            text.includes(`start-${tag}`),
+            `call ${tag} lost its own start line: ${text.slice(0, 80)}`,
+          );
+          assert(text.includes(`end-${tag}`), `call ${tag} lost its own end line`);
+          assert(text.includes(`value-${tag}`), `call ${tag} lost its own value`);
+          for (const other of tags.filter((t) => t !== tag)) {
+            assert(!text.includes(other), `call ${tag} saw call ${other}'s output`);
+          }
+        });
+
+        // The globals a model expects, and not the ones that reach the server.
+        const missing = await run(
+          session,
+          "const want = ['setTimeout','URL','TextEncoder','atob','fetch','structuredClone','crypto','Buffer'];\n" +
+            "want.filter((n) => typeof globalThis[n] === 'undefined').join(', ') || 'all present'",
+        );
+        assert(missing === "all present", `globals missing from the context: ${missing}`);
+
+        const escapes = await run(
+          session,
+          "['process','require','module'].filter((n) => typeof globalThis[n] !== 'undefined').join(', ') || 'none reachable'",
+        );
+        assert(
+          escapes === "none reachable",
+          `the server's own environment is reachable: ${escapes}`,
+        );
+      } finally {
+        session.close();
+      }
+      pass("calls-serialized");
+    });
+  },
+
   async "persist-restart"() {
     await gate("persist-restart", async (dir) => {
       const first = await openSession({ env: envFor(dir) });

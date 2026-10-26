@@ -455,6 +455,66 @@ describe("a definition that depends on this call stays in this call", () => {
   });
 });
 
+describe("calls run one at a time", () => {
+  // The namespace is a single shared mutable thing, so two calls executing at
+  // once would interleave their captured output. A host is free to pipeline
+  // requests, so this is not hypothetical — measured: without serialization, 3
+  // of 4 concurrent calls returned another call's output.
+  it("keeps concurrent calls out of each other's output", async () => {
+    if (!session) session = await openSession({ env: env() });
+    const tags = ["A", "B", "C", "D"];
+
+    const results = await Promise.all(
+      tags.map((tag, index) =>
+        session
+          .request(
+            toolCall(100 + index, "run", {
+              code:
+                `console.log('start-${tag}');\n` +
+                `await new Promise((r) => setTimeout(r, ${30 - index * 6}));\n` +
+                `console.log('end-${tag}');\n` +
+                `'value-${tag}'`,
+              session_id: `concurrent-${index}`,
+            }),
+          )
+          .then((frame) => textOf(frame)),
+      ),
+    );
+
+    results.forEach((text, index) => {
+      const tag = tags[index];
+      expect(text).toContain(`start-${tag}`);
+      expect(text).toContain(`end-${tag}`);
+      expect(text).toContain(`value-${tag}`);
+      for (const other of tags.filter((t) => t !== tag)) {
+        expect(text).not.toContain(other);
+      }
+    });
+  });
+
+  it("has the globals a model expects, and not the ones that reach the server", async () => {
+    // A vm context starts almost empty: no timers, no URL, no text encoding.
+    const missing = await run(
+      "const want = ['setTimeout','URL','TextEncoder','atob','fetch','structuredClone','crypto','Buffer'];\n" +
+        "want.filter((n) => typeof globalThis[n] === 'undefined').join(', ') || 'all present'",
+    );
+    expect(missing).toBe("all present");
+
+    const encoded = await run(
+      "btoa('hi') + ' ' + new TextDecoder().decode(new Uint8Array([65,66]))",
+    );
+    expect(encoded).toBe("aGk= AB");
+
+    // `process`, `require` and `module` would reach the server's own environment
+    // and module graph, which is a different thing from running code with its
+    // authority.
+    const escapes = await run(
+      "['process','require','module'].filter((n) => typeof globalThis[n] !== 'undefined').join(', ') || 'none reachable'",
+    );
+    expect(escapes).toBe("none reachable");
+  });
+});
+
 describe("definitions persist across restarts", () => {
   it("reloads a definition in a fresh process pointed at the same directory", async () => {
     await run("const persisted = (x) => x + 1;");
