@@ -73,6 +73,12 @@ from inside that namespace rather than advertised as verbs.
   CHECK: node tools/checks/check.mjs errors-are-described
   EXPECT: gate-passed:errors-are-described
 
+## The README's examples actually work
+
+- [x] G26: Every capability call in the README names real parameters — checked against each capability's OWN schema read live through `describe`, so the document cannot drift from the implementation. A wrong parameter name there is a defect with no error attached: the reader copies it, gets a schema error, and has to work out which side is wrong
+  CHECK: node tools/checks/check.mjs readme-examples-are-valid
+  EXPECT: gate-passed:readme-examples-are-valid
+
 ## An accumulator does not become a tool
 
 - [x] G25: A `const` container the call MUTATES is not saved — `const acc = []; acc.push(x)` is an accumulator, and saving it would start the next call with the previous call's contents — while a container that is only READ (a member read or a pure method call) is still saved
@@ -190,6 +196,8 @@ from inside that namespace rather than advertised as verbs.
 | G15 | report no source for a skill that has one | `sourceSize reported nothing useful: null` |
 | G16 | classify definitions without checking what they depend on | `a pipeline did not run in source order: While defining: rows is not defined` |
 | G17 | save a declaration whose initializer calls something | `a computed value was persisted as a tool: after.js, before.js, doubleAll.js` |
+| G26 | the README says `name_a`/`name_b` (the real names) | `the README calls compare_projects({ name_a: ... }) but compare_projects has no such parameter — it takes compare_projects({project_a, project_b, include_source})` |
+| G26 | use a real parameter of the WRONG capability | `the README calls research_technique({ query: ... }) but research_technique has no such parameter — it takes research_technique({technique, detail, max_results})` |
 | G25 | drop the mutation check entirely | `an array pushed to leaked into the next call: acc is object` |
 | G25 | keep mutation detection but not consult the bound name | `an array pushed to leaked into the next call: acc is object` |
 | G24 | remove the scan budget | `the scan ran 44994ms with a 1500ms budget` (the host timeout) |

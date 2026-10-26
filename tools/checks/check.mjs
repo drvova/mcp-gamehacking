@@ -1270,6 +1270,55 @@ missing.length === 0 ? "all reachable" : "missing: " + missing.join(", ")`,
     });
   },
 
+  async "readme-examples-are-valid"() {
+    await gate("readme-examples-are-valid", async (dir) => {
+      // The README is what a user reads before writing a single call, so a wrong
+      // parameter name there is a defect with no error attached: they copy it,
+      // get a schema error, and have to work out which side is wrong. Found
+      // exactly that — the README showed `compare_projects({ name_a, name_b })`
+      // while the real parameters are `project_a`/`project_b`.
+      //
+      // Every example is checked against the capability's OWN schema, read live
+      // through `describe`, so the doc cannot drift from the implementation.
+      const readme = readFileSync(join(ROOT, "README.md"), "utf8");
+
+      // Capability names, straight from the server source.
+      const source = readFileSync(join(ROOT, "src", "index.ts"), "utf8");
+      const capabilities = [...source.matchAll(/^\s*"([a-z_]+)",$/gm)].map((m) => m[1]);
+      assert(
+        capabilities.length > 10,
+        `only ${capabilities.length} capabilities found in the source`,
+      );
+
+      // Each `<capability>({ ... })` in the README, with the keys it passes.
+      const examples = [];
+      for (const match of readme.matchAll(/([a-z_]+)\(\{\s*([^{}]*?)\s*\}\)/g)) {
+        const [, name, body] = match;
+        if (!capabilities.includes(name)) continue;
+        const keys = [...body.matchAll(/(?:^|,)\s*([a-z_][a-z0-9_]*)\s*:/g)].map((m) => m[1]);
+        if (keys.length) examples.push({ name, keys });
+      }
+      assert(examples.length >= 3, `found only ${examples.length} callable examples in the README`);
+
+      const session = await openSession({ env: envFor(dir) });
+      try {
+        for (const { name, keys } of examples) {
+          const described = await run(session, `describe(${name})`);
+          for (const key of keys) {
+            // The description lists the accepted parameters as `- key: type`.
+            assert(
+              new RegExp(`- ${key}:`).test(described),
+              `the README calls ${name}({ ${key}: ... }) but ${name} has no such parameter — it takes ${described.split("\n")[0]}`,
+            );
+          }
+        }
+      } finally {
+        session.close();
+      }
+      pass("readme-examples-are-valid");
+    });
+  },
+
   async "index-stability"() {
     if (!archivePresent()) skip("index-stability", "archive data absent");
     await gate("index-stability", async (dir) => {

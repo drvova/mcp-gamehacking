@@ -262,7 +262,7 @@ Every example below is one call to `run`.
 ```
 > run("await research_technique({ technique: 'EPT hook' })")
 
-Found 12 relevant skills (showing top 10):
+Found 538 relevant skills (showing top 10):
 - ags-budget-ept (score:7) -- BudgetEPT: stealthy inline EPT-like hooks...
 - ags-hyper-deceit (score:6) -- HyperDeceit: HvcallCodeVa hook framework...
 ```
@@ -290,7 +290,7 @@ Found 12 relevant skills (showing top 10):
 ### Cross-reference offsets across the archive
 
 ```
-> run("await compare_projects({ name_a: 'ags-kdmapper', name_b: 'ags-kdmapper-rs' })")
+> run("await compare_projects({ project_a: 'ags-kdmapper', project_b: 'ags-kdmapper-rs' })")
 ```
 
 ### Ask what something does before calling it
@@ -326,7 +326,7 @@ mcp-gamehacking/
 +|   +-- server.test.ts        #   capabilities, driven from code
 +-- dist/                      # Compiled JS
 +-- skills/                    # 4,161 skill directories
-|   +-- <hand-written>/        #   177 curated deep-dive skills
+|   +-- <hand-written>/        #   175 curated deep-dive skills
 |   +-- ags-*/                 #   3,985 archived projects
 |       +-- SKILL.md           #     description + metadata
 |       +-- source.txt         #     full source tree snapshot
