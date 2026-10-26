@@ -598,6 +598,40 @@ const gates = {
     });
   },
 
+  async "asi-accident"() {
+    await gate("asi-accident", async (dir) => {
+      const session = await openSession({ env: envFor(dir) });
+      try {
+        // ASI merges `f()` followed by a template into a tagged template, so the
+        // raw failure is "f(...) is not a function" — a message that says nothing
+        // about the missing semicolon. Found by driving the live host.
+        const accident = await run(session, "const x = 1;\nforget('x')\n`kept: ${kept()}`");
+        assert(
+          /TAGGED TEMPLATE/.test(accident),
+          `the accident was not explained: ${accident.slice(0, 100)}`,
+        );
+        assert(/semicolon/i.test(accident), "the explanation does not say how to fix it");
+        assert(/Nothing ran/.test(accident), "the explanation does not say nothing ran");
+
+        const line = await run(session, "const x = 1\n`value ${x}`");
+        assert(/Line 2/.test(line), `the line number is wrong: ${line.slice(0, 60)}`);
+
+        // Real template tags must still work: a name or member tag is real code.
+        const tag = await run(session, "const tag = (p, v) => p[0] + v;\ntag`hi ${'x'}`");
+        assert(tag === "hi x", `a real template tag broke: ${tag}`);
+        const member = await run(session, "const sql = { run: (p) => p[0] };\nsql.run`select`");
+        assert(member === "select", `a member template tag broke: ${member}`);
+
+        // And the semicolon fixes it.
+        const fixed = await run(session, "const x = 1;\n`value ${x}`");
+        assert(fixed === "value 1", `the semicolon did not fix it: ${fixed}`);
+      } finally {
+        session.close();
+      }
+      pass("asi-accident");
+    });
+  },
+
   async "run-semantics"() {
     await gate("run-semantics", async (dir) => {
       const session = await openSession({ env: envFor(dir) });

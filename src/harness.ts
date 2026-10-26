@@ -164,6 +164,53 @@ function isDefinition(node: Statement): boolean {
 }
 
 /**
+ * Find a template literal that ASI joined to the line above it, or null.
+ *
+ * A tag that is a name or a member expression is real code (`sql\`...\``); a tag
+ * that is a call, a literal or an operator is two statements that got merged.
+ */
+function findAsiAccident(ast: acorn.Program, code: string): { line: number } | null {
+  const visit = (node: unknown): { line: number } | null => {
+    if (node === null || typeof node !== "object") return null;
+    const record = node as Record<string, unknown> & { type?: string };
+
+    if (record.type === "TaggedTemplateExpression") {
+      const tag = record.tag;
+      const tagType =
+        tag !== null && typeof tag === "object" ? (tag as { type?: string }).type : undefined;
+      if (tagType !== "Identifier" && tagType !== "MemberExpression") {
+        // Point at the TEMPLATE, not at the statement it got merged into: the
+        // template is the line the author needs to fix.
+        const quasi = record.quasi;
+        const start =
+          quasi !== null && typeof quasi === "object" && "start" in quasi
+            ? Number((quasi as { start?: number }).start ?? record.start)
+            : typeof record.start === "number"
+              ? record.start
+              : 0;
+        // A character offset is not a line; count the newlines before it.
+        return { line: code.slice(0, start).split("\n").length };
+      }
+    }
+
+    for (const [key, value] of Object.entries(record)) {
+      if (key === "start" || key === "end" || key === "loc" || key === "range") continue;
+      if (Array.isArray(value)) {
+        for (const child of value) {
+          const found = visit(child);
+          if (found !== null) return found;
+        }
+      } else if (value !== null && typeof value === "object") {
+        const found = visit(value);
+        if (found !== null) return found;
+      }
+    }
+    return null;
+  };
+  return visit(ast);
+}
+
+/**
  * Whether a node is a static value: something that can be written down again
  * without re-running anything.
  *
@@ -1033,6 +1080,9 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
       "  - A trailing expression is returned, and so is anything assigned to `result`.",
       "  - `console.log` is captured and returned with the value.",
       "  - Redefining a name is fine; refining a helper is the point.",
+      "  - End a statement with `;` when the NEXT line starts with `\\``, `(` or `[`.",
+      "    JavaScript joins those lines otherwise (a template becomes a TAG, so",
+      "    `f()\\n\\`x\\`` tries to call f()'s result). Other lines do not need one.",
       "",
       "  WHAT IS SAVED — this decides what you still have next call:",
       "",
@@ -1120,6 +1170,32 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
         }
       }
       if (!changed) break;
+    }
+
+    // Automatic semicolon insertion merges two lines that look like two
+    // statements into one expression:
+    //
+    //     forget('x')
+    //     `kept: ${kept()}`
+    //
+    // parses as `forget('x')` used as a TEMPLATE TAG, so it fails with
+    // "forget(...) is not a function" — an error that says nothing about the
+    // missing semicolon. `const x = 1` followed by a template merges the same
+    // way and fails with "Cannot access 'x' before initialization", which is
+    // equally unhelpful.
+    //
+    // A template tag is a name or a member expression in any real code, so a
+    // tag that is a call or a literal is reported as the accident it is.
+    const asi = findAsiAccident(ast, code);
+    if (asi !== null) {
+      return [
+        `Line ${asi.line}: a template literal on the line after code is joined to it,`,
+        "so it is parsed as a TAGGED TEMPLATE rather than a new statement.",
+        "",
+        "Add a semicolon at the end of the previous line.",
+        "",
+        "Nothing ran.",
+      ].join("\n");
     }
 
     const definitions: Definition[] = [];

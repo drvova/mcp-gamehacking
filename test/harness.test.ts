@@ -242,6 +242,30 @@ describe("one long-lived namespace", () => {
     expect(await run("after")).toBe("1");
   });
 
+  it("explains a template literal joined to the line above, instead of a type error", async () => {
+    // ASI parses `forget('x')` followed by a template as a TAGGED TEMPLATE, so the
+    // call's result is used as a tag. The raw error ("forget(...) is not a
+    // function") says nothing about the missing semicolon.
+    const accident = await run("const x = 1;\nforget('x')\n`kept: ${kept()}`");
+
+    expect(accident).toMatch(/TAGGED TEMPLATE/);
+    expect(accident).toMatch(/semicolon/i);
+    expect(accident).toMatch(/Nothing ran/);
+  });
+
+  it("names the line the template is on", async () => {
+    const accident = await run("const x = 1\n`value ${x}`");
+
+    expect(accident).toMatch(/Line 2/);
+  });
+
+  it("still runs real template tags and member tags", async () => {
+    // A name or a member expression as the tag is real code, so the check must
+    // not reject it.
+    expect(await run("const tag = (p, v) => p[0] + v;\ntag`hi ${'x'}`")).toBe("hi x");
+    expect(await run("const sql = { run: (p) => p[0] };\nsql.run`select`")).toBe("select");
+  });
+
   it("reports a syntax error without running anything", async () => {
     const failed = await run("const = ;");
 

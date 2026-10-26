@@ -67,6 +67,12 @@ from inside that namespace rather than advertised as verbs.
   CHECK: node tools/checks/check.mjs helper-identity
   EXPECT: gate-passed:helper-identity
 
+## A joined line is explained, not left to confuse
+
+- [x] G21: A template literal joined to the line above by automatic semicolon insertion is reported as what it is — naming the line and the fix — while a real template tag (a name or member expression) still runs and a semicolon fixes the code
+  CHECK: node tools/checks/check.mjs asi-accident
+  EXPECT: gate-passed:asi-accident
+
 ## The manual tells the truth
 
 - [x] G20: Every line of the manual's own persistence table is read back and executed — a manual that misdescribes the rules fails here rather than misleading a model, and it states the rule at all rather than leaving a model to discover it by losing a tool
@@ -157,6 +163,8 @@ from inside that namespace rather than advertised as verbs.
 | G15 | report no source for a skill that has one | `sourceSize reported nothing useful: null` |
 | G16 | classify definitions without checking what they depend on | `a pipeline did not run in source order: While defining: rows is not defined` |
 | G17 | save a declaration whose initializer calls something | `a computed value was persisted as a tool: after.js, before.js, doubleAll.js` |
+| G21 | drop the joined-line check | `the accident was not explained: TypeError: forget(...) is not a function` |
+| G21 | reject every template tag, not just the accident | `a real template tag broke: Line 2: a template literal on the line after code is joined to it,` |
 | G20 | print `let` as saved in the manual | `the manual says \`let total = 0\` is saved, but it was not saved` |
 | G20 | print arithmetic as saved in the manual | `the manual says \`const sum = 1 + 2\` is saved, but it was not saved` |
 | G19 | save a computed initializer | `a computed value was persisted as a tool: after.js, before.js, doubleAll.js` |
