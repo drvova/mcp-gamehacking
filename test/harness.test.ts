@@ -357,6 +357,36 @@ describe("a definition that depends on this call stays in this call", () => {
     expect(readdirSync(harnessDir)).toContain("fetchTop.js");
   });
 
+  it("saves a tool and not a value", async () => {
+    // A tool is callable, constructible, or a literal the author keeps. Anything
+    // that COMPUTES is a value for this call: persisting it would replay the
+    // computation at every load.
+    await run(
+      "const double = (n) => n * 2;\n" +
+        "class Box { }\n" +
+        "const config = { retries: 3, deep: { a: [1, 2] } };\n" +
+        "const names = ['a', 'b'];\n" +
+        "const limit = 50;\n" +
+        "const sum = 1 + 2;\n" +
+        "const label = `x${1}`;\n" +
+        "const mapped = [1, 2].map((n) => n);\n" +
+        "const picked = true ? 1 : 2;",
+    );
+
+    const files = readdirSync(harnessDir).sort();
+    expect(files).toEqual(["Box.js", "config.js", "double.js", "limit.js", "names.js"]);
+  });
+
+  it("treats a mutable binding as scratch, not as a tool", async () => {
+    // `let total = 0` then `total += 1` would carry a stale value into the next
+    // call, so a mutable binding is never saved.
+    await run("let total = 0;\ntotal += 1;\nvar scratch = 1;\nconst kept = () => total;");
+
+    const files = readdirSync(harnessDir).sort();
+    expect(files).not.toContain("total.js");
+    expect(files).not.toContain("scratch.js");
+  });
+
   it("keeps a helper whose parameter shadows the call-local name", async () => {
     // `(d) => d` binds its own `d`; it does not read the call's. Skipping it
     // would be the quieter failure: nothing breaks, the tool is simply gone.

@@ -632,6 +632,42 @@ const gates = {
         await run(session, "const fetchTop = async (q) => await q;");
         assert(readdirSync(dir).includes("fetchTop.js"), "a helper whose body calls was not saved");
 
+        // A TOOL is callable, constructible, or a literal the author keeps. A
+        // VALUE that computes is for this call only — persisting it would replay
+        // the computation at every load — and a MUTABLE binding is scratch, since
+        // it would carry a stale value into the next call.
+        const valueCases = [
+          { name: "computeSum", code: "const computeSum = 1 + 2;", saves: false },
+          { name: "computeTemplate", code: "const computeTemplate = `x${1}`;", saves: false },
+          { name: "computeMapped", code: "const computeMapped = [1].map((n) => n);", saves: false },
+          { name: "computePick", code: "const computePick = true ? 1 : 2;", saves: false },
+          { name: "scratchLet", code: "let scratchLet = 0;\nscratchLet += 1;", saves: false },
+          { name: "scratchVar", code: "var scratchVar = 1;", saves: false },
+          { name: "toolArrow", code: "const toolArrow = (n) => n;", saves: true },
+          { name: "toolClass", code: "class toolClass { }", saves: true },
+          {
+            name: "toolConfig",
+            code: "const toolConfig = { retries: 3, deep: { a: [1] } };",
+            saves: true,
+          },
+          { name: "toolList", code: "const toolList = ['a', 'b'];", saves: true },
+          { name: "toolLimit", code: "const toolLimit = 50;", saves: true },
+          {
+            name: "toolStaticTemplate",
+            code: "const toolStaticTemplate = `skills/a`;",
+            saves: true,
+          },
+          { name: "toolApi", code: "const toolApi = { ping: () => 'pong' };", saves: true },
+        ];
+        for (const valueCase of valueCases) {
+          await run(session, valueCase.code);
+          const present = readdirSync(dir).includes(`${valueCase.name}.js`);
+          assert(
+            present === valueCase.saves,
+            `${valueCase.name} was ${present ? "saved" : "skipped"} but should be ${valueCase.saves ? "saved" : "skipped"}`,
+          );
+        }
+
         // SHADOWING decides this correctly in both directions. A parameter, or a
         // local declared at the top of the body, shadows the outer name, so the
         // helper is a tool; a default value or a nested block does not, so it is

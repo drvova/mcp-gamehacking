@@ -75,6 +75,10 @@ from inside that namespace rather than advertised as verbs.
 
 ## A definition that depends on this call stays in this call
 
+- [x] G19: A tool is callable, constructible, or a literal — never a computed value and never a mutable binding: `1 + 2`, a template with expressions, a mapped array, a ternary, `let`, and `var` are all per-call, while an arrow, a class, a generator, a config object, an array of names, a plain or negative literal, a static template, and an object of functions are all saved
+  CHECK: node tools/checks/check.mjs call-local-dependency
+  EXPECT: gate-passed:call-local-dependency
+
 - [x] G18: Shadowing is decided in BOTH directions — a parameter, a destructured/rest parameter, or a local declared at the top of the body shadows the call-local name (so the helper IS saved), while a default value, a nested arrow body, or a declaration inside a nested block does not (so it is NOT)
   CHECK: node tools/checks/check.mjs call-local-dependency
   EXPECT: gate-passed:call-local-dependency
@@ -147,6 +151,10 @@ from inside that namespace rather than advertised as verbs.
 | G15 | report no source for a skill that has one | `sourceSize reported nothing useful: null` |
 | G16 | classify definitions without checking what they depend on | `a pipeline did not run in source order: While defining: rows is not defined` |
 | G17 | save a declaration whose initializer calls something | `a computed value was persisted as a tool: after.js, before.js, doubleAll.js` |
+| G19 | save a computed initializer | `a computed value was persisted as a tool: after.js, before.js, doubleAll.js` |
+| G19 | save a mutable binding | `scratchLet was saved but should be skipped` |
+| G19 | treat a template with expressions as static | `computeTemplate was saved but should be skipped` |
+| G19 | treat arithmetic as static | `a computed value was persisted as a tool` |
 | G18 | ignore parameter shadowing | `shadowParam was skipped but should be saved` |
 | G18 | treat a default value as a binding rather than a use | `defaultReads was saved but should be skipped` |
 | G18 | treat a nested-block declaration as shadowing the body | `blockReads was saved but should be skipped` |

@@ -146,43 +146,79 @@ function isDefinition(node: Statement): boolean {
   if (node.type === "FunctionDeclaration" || node.type === "ClassDeclaration") return true;
   const declaration = asVariableStatement(node);
   if (declaration === null) return false;
+  // `let` and `var` are scratch. A mutable binding carried into the next call
+  // starts it from a stale value — `let total = 0` then `total += 1` would make
+  // the next call begin at 1 — and a value is not a tool. `const` is the
+  // commitment to something worth keeping.
+  if (declaration.kind !== "const") return false;
   if (awaitsHere(node)) return false;
   // `const before = stats().peakMB` computes a value NOW. Saving it would re-run
   // that call on every load, which is the work the contract says never to
   // replay — and the value would be meaningless anyway, since it is a snapshot.
   // Only an initializer that creates something (a function, a class, a literal)
   // is a tool.
-  if (declaration.declarations.some((d) => d.init !== null && invokesHere(d.init))) return false;
+  if (declaration.declarations.some((d) => d.init !== null && !isStaticValue(d.init))) {
+    return false;
+  }
   return declaration.declarations.every((d) => d.id.type === "Identifier");
 }
 
 /**
- * Whether a node CALLS something at its own level.
+ * Whether a node is a static value: something that can be written down again
+ * without re-running anything.
  *
- * Descent stops at every function boundary, as with `await`: a helper whose body
- * calls things is still a helper, because those calls happen when it is CALLED.
- * A declaration whose own initializer calls is computing a value now.
+ * Recursive, because `{ a: [1, 2] }` is static as a whole only if its parts are.
+ * Anything that COMPUTES — a call, an arithmetic operator, a template with
+ * expressions — is not: persisting it would replay that computation at every
+ * load, which is the work the contract says never to replay.
+ *
+ *     const config = { retries: 3 }    static   — a literal the author keeps
+ *     const double = (n) => n * 2      static   — callable
+ *     const sum = 1 + 2                computes — a value for this call
+ *     const before = stats().kept      computes
  */
-function invokesHere(node: unknown): boolean {
+function isStaticValue(node: unknown): boolean {
   if (node === null || typeof node !== "object") return false;
-  const record = node as Record<string, unknown> & { type?: string };
-  if (record.type === "CallExpression" || record.type === "NewExpression") return true;
-  if (
-    record.type === "FunctionDeclaration" ||
-    record.type === "FunctionExpression" ||
-    record.type === "ArrowFunctionExpression"
-  ) {
-    return false;
-  }
-  for (const [key, value] of Object.entries(record)) {
-    if (key === "start" || key === "end" || key === "loc" || key === "range") continue;
-    if (Array.isArray(value)) {
-      if (value.some((child) => invokesHere(child))) return true;
-    } else if (value !== null && typeof value === "object" && invokesHere(value)) {
+  const record = node as Record<string, unknown> & { type?: string; computed?: boolean };
+
+  switch (record.type) {
+    case "Literal":
       return true;
+    case "Identifier":
+      // A reference to another binding: an alias is as static as its target.
+      return true;
+    case "FunctionExpression":
+    case "ArrowFunctionExpression":
+    case "ClassExpression":
+      return true;
+    case "TemplateLiteral": {
+      const expressions = record.expressions;
+      return Array.isArray(expressions) && expressions.length === 0;
     }
+    case "UnaryExpression":
+      // `-1` is a value: the operator applies to a literal.
+      return isStaticValue(record.argument);
+    case "ArrayExpression": {
+      const elements = record.elements;
+      if (!Array.isArray(elements)) return false;
+      return elements.every((element) => element === null || isStaticValue(element));
+    }
+    case "ObjectExpression": {
+      const properties = record.properties;
+      if (!Array.isArray(properties)) return false;
+      return properties.every((property) => {
+        if (property === null || typeof property !== "object") return false;
+        const prop = property as Record<string, unknown>;
+        if (prop.type === "SpreadElement") return isStaticValue(prop.argument);
+        if (prop.computed === true) return false;
+        return isStaticValue(prop.value);
+      });
+    }
+    default:
+      // CallExpression, NewExpression, BinaryExpression, MemberExpression,
+      // ConditionalExpression, UpdateExpression and the rest all compute.
+      return false;
   }
-  return false;
 }
 
 /**
@@ -1002,8 +1038,11 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
       "    work in a statement and define from the result.",
       "  - A declaration that DEPENDS on something you computed in this call is also",
       "    call-local, not a saved tool: it is per-call data.",
-      "  - So is a declaration whose own initializer CALLS something: it computes a",
-      "    value now. A tool is a function, a class, or a literal.",
+      "  - So is a declaration whose own initializer COMPUTES something (`1 + 2`, a",
+      "    call, a template with expressions): it computes a value now.",
+      "  - A tool is `const`: a function, a class, or a literal you want to keep.",
+      "    `let` and `var` are scratch — a mutable binding would carry a stale value",
+      "    into the next call, so it is never saved.",
       "",
       "## What the project offers",
       "",
