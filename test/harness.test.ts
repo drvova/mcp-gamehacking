@@ -279,6 +279,94 @@ describe("the session binds its working objects", () => {
   });
 });
 
+describe("a definition that depends on this call stays in this call", () => {
+  // Found by driving the live host: a model wrote a pipeline, and the step that
+  // derived from an earlier value was classified as a saved definition and run
+  // BEFORE the work that produced its input — so it failed with "src is not
+  // defined". A value derived from per-call data is per-call data, not a tool.
+  it("runs a pipeline in source order", async () => {
+    const output = await run(
+      "const rows = await Promise.resolve([1,2,3]);\n" +
+        "const doubled = rows.map((n) => n * 2);\n" +
+        "const total = doubled.reduce((a, b) => a + b, 0);\n" +
+        "total",
+    );
+
+    expect(output).toBe("12");
+  });
+
+  it("saves none of a pipeline, because none of it is a tool", async () => {
+    await run(
+      "const rows = await Promise.resolve([1,2]);\n" +
+        "const doubled = rows.map((n) => n * 2);\n" +
+        "const total = doubled.reduce((a, b) => a + b, 0);",
+    );
+
+    expect(readdirSync(harnessDir)).toHaveLength(0);
+  });
+
+  it("still saves a helper that depends on nothing", async () => {
+    await run(
+      "const data = await Promise.resolve([1,2]);\n" +
+        "/** Double every number. */\n" +
+        "const doubleAll = (list) => list.map((n) => n * 2);",
+    );
+
+    expect(readdirSync(harnessDir)).toContain("doubleAll.js");
+    // And the call-local value is not saved beside it.
+    expect(readdirSync(harnessDir)).not.toContain("data.js");
+  });
+
+  it("treats a helper that reads per-call data as per-call data", async () => {
+    const output = await run(
+      "const data = await Promise.resolve([5,6]);\n" + "const len = () => data.length;\n" + "len()",
+    );
+
+    expect(output).toBe("2");
+    // Its body reads `data`, so saving it would persist a tool that breaks on
+    // the next call — dependency inside a function body still counts.
+    expect(readdirSync(harnessDir)).not.toContain("len.js");
+  });
+
+  it("does not save a value its initializer computed", async () => {
+    // `const before = stats().peakMB` computes a snapshot now. Saving it would
+    // re-run the call on every load — the work the contract says never to
+    // replay — and the stored number would be meaningless.
+    await run("const before = stats().peakMB;\nconst after = stats().peakMB;");
+
+    expect(readdirSync(harnessDir)).toHaveLength(0);
+  });
+
+  it("saves a function, a class and a literal, but not a call", async () => {
+    await run(
+      "const double = (n) => n * 2;\n" +
+        "class Box { m(){ return 1 } }\n" +
+        "const config = { retries: 3 };\n" +
+        "const names = ['a','b'];\n" +
+        "const now = Date.now();",
+    );
+
+    const files = readdirSync(harnessDir).sort();
+    expect(files).toEqual(["Box.js", "config.js", "double.js", "names.js"]);
+  });
+
+  it("saves a helper whose body calls something", async () => {
+    // The calls happen when the helper is CALLED, so it is still a tool.
+    await run("const fetchTop = async (q) => await q;");
+
+    expect(readdirSync(harnessDir)).toContain("fetchTop.js");
+  });
+
+  it("uses a saved tool and per-call data together", async () => {
+    await run("/** Sum a list. */\nconst sum = (list) => list.reduce((a, b) => a + b, 0);");
+    const output = await run(
+      "const rows = await Promise.resolve([10, 20]);\n" + "`${sum(rows)} from ${rows.length} rows`",
+    );
+
+    expect(output).toBe("30 from 2 rows");
+  });
+});
+
 describe("definitions persist across restarts", () => {
   it("reloads a definition in a fresh process pointed at the same directory", async () => {
     await run("const persisted = (x) => x + 1;");

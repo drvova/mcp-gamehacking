@@ -577,6 +577,85 @@ const gates = {
 
   // ----------------------------------------------------- persistence on disk
 
+  async "call-local-dependency"() {
+    await gate("call-local-dependency", async (dir) => {
+      const session = await openSession({ env: envFor(dir) });
+      try {
+        // A model writing a pipeline must get source-order semantics. The step
+        // that derives from an earlier value is per-call data, not a saved tool:
+        // classified as a definition it would run BEFORE the work that produces
+        // its input, and fail with "x is not defined".
+        const pipeline = await run(
+          session,
+          "const rows = await Promise.resolve([1,2,3]);\n" +
+            "const doubled = rows.map((n) => n * 2);\n" +
+            "const total = doubled.reduce((a, b) => a + b, 0);\n" +
+            "total",
+        );
+        assert(pipeline === "12", `a pipeline did not run in source order: ${pipeline}`);
+
+        const files = readdirSync(dir).sort();
+        assert(files.length === 0, `a derived value was persisted as a tool: ${files.join(", ")}`);
+
+        // A helper that depends on nothing is still saved, with its description.
+        await run(
+          session,
+          "const data = await Promise.resolve([1,2]);\n" +
+            "/** Double every number. */\n" +
+            "const doubleAll = (list) => list.map((n) => n * 2);",
+        );
+        const after = readdirSync(dir).sort();
+        assert(after.includes("doubleAll.js"), `a real tool was not saved: ${after.join(", ")}`);
+        assert(!after.includes("data.js"), "per-call data was saved as a tool");
+
+        // A value its initializer COMPUTED is not a tool: saving it would re-run
+        // the call on every load, and the stored snapshot would be meaningless.
+        await run(session, "const before = stats().peakMB;\nconst after = stats().peakMB;");
+        const computed = readdirSync(dir).sort();
+        assert(
+          !computed.includes("before.js") && !computed.includes("after.js"),
+          `a computed value was persisted as a tool: ${computed.join(", ")}`,
+        );
+
+        // But a function, a class and a literal are tools, even beside it.
+        await run(
+          session,
+          "const triple = (n) => n * 3;\nclass Crate { m(){ return 1 } }\nconst limits = { retries: 2 };",
+        );
+        const tools = readdirSync(dir).sort();
+        for (const expected of ["triple.js", "Crate.js", "limits.js"]) {
+          assert(tools.includes(expected), `${expected} was not saved: ${tools.join(", ")}`);
+        }
+
+        // A helper whose BODY calls is still a tool: the calls happen when it is
+        // called, not when it is loaded.
+        await run(session, "const fetchTop = async (q) => await q;");
+        assert(readdirSync(dir).includes("fetchTop.js"), "a helper whose body calls was not saved");
+
+        // A helper whose BODY reads per-call data is per-call data too, because
+        // saving it would persist a tool that breaks on the next call.
+        await run(
+          session,
+          "const seed = await Promise.resolve([5,6]);\nconst lengthOf = () => seed.length;",
+        );
+        assert(
+          !readdirSync(dir).includes("lengthOf.js"),
+          "a helper reading per-call data was persisted",
+        );
+
+        // And the saved tool still works alongside fresh per-call data.
+        const combined = await run(
+          session,
+          "const rows2 = await Promise.resolve([10, 20]);\n`${doubleAll(rows2)}`",
+        );
+        assert(combined === "20,40", `a saved tool did not combine with new data: ${combined}`);
+      } finally {
+        session.close();
+      }
+      pass("call-local-dependency");
+    });
+  },
+
   async "persist-restart"() {
     await gate("persist-restart", async (dir) => {
       const first = await openSession({ env: envFor(dir) });

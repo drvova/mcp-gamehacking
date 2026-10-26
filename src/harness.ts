@@ -147,7 +147,42 @@ function isDefinition(node: Statement): boolean {
   const declaration = asVariableStatement(node);
   if (declaration === null) return false;
   if (awaitsHere(node)) return false;
+  // `const before = stats().peakMB` computes a value NOW. Saving it would re-run
+  // that call on every load, which is the work the contract says never to
+  // replay — and the value would be meaningless anyway, since it is a snapshot.
+  // Only an initializer that creates something (a function, a class, a literal)
+  // is a tool.
+  if (declaration.declarations.some((d) => d.init !== null && invokesHere(d.init))) return false;
   return declaration.declarations.every((d) => d.id.type === "Identifier");
+}
+
+/**
+ * Whether a node CALLS something at its own level.
+ *
+ * Descent stops at every function boundary, as with `await`: a helper whose body
+ * calls things is still a helper, because those calls happen when it is CALLED.
+ * A declaration whose own initializer calls is computing a value now.
+ */
+function invokesHere(node: unknown): boolean {
+  if (node === null || typeof node !== "object") return false;
+  const record = node as Record<string, unknown> & { type?: string };
+  if (record.type === "CallExpression" || record.type === "NewExpression") return true;
+  if (
+    record.type === "FunctionDeclaration" ||
+    record.type === "FunctionExpression" ||
+    record.type === "ArrowFunctionExpression"
+  ) {
+    return false;
+  }
+  for (const [key, value] of Object.entries(record)) {
+    if (key === "start" || key === "end" || key === "loc" || key === "range") continue;
+    if (Array.isArray(value)) {
+      if (value.some((child) => invokesHere(child))) return true;
+    } else if (value !== null && typeof value === "object" && invokesHere(value)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -332,6 +367,68 @@ function firstComment(source: string): string | undefined {
     if (/^(const|let|var|return|await|if|for|while|throw|globalThis|Object)\b/.test(line)) break;
   }
   return undefined;
+}
+
+/** The name a declaration binds, if it binds exactly one. */
+function declaredName(node: unknown): string | undefined {
+  if (node === null || typeof node !== "object" || !("id" in node)) return undefined;
+  const id = node.id;
+  if (id === null || typeof id !== "object" || !("name" in id)) return undefined;
+  return typeof id.name === "string" ? id.name : undefined;
+}
+
+/** Names a statement binds at its own level. */
+function boundNames(node: Statement): string[] {
+  const declaration = asVariableStatement(node);
+  if (declaration !== null) {
+    return declaration.declarations
+      .map((d) => d.id.name)
+      .filter((name): name is string => typeof name === "string");
+  }
+  const name = declaredName(node);
+  return name === undefined ? [] : [name];
+}
+
+/**
+ * Whether a node mentions any of these names, INCLUDING inside function bodies.
+ *
+ * Unlike the await check, descent does not stop at a function boundary: a helper
+ * whose body reads a value computed in this call still depends on that call, so
+ * it is call-local too.
+ */
+function referencesNames(node: unknown, names: Set<string>): boolean {
+  if (names.size === 0) return false;
+  if (node === null || typeof node !== "object") return false;
+  const record = node as Record<string, unknown> & { type?: string; computed?: boolean };
+
+  if (record.type === "Identifier") {
+    return typeof record.name === "string" && names.has(record.name);
+  }
+
+  for (const [key, value] of Object.entries(record)) {
+    if (key === "start" || key === "end" || key === "loc" || key === "range") continue;
+    // A property name is not a reference: `a.b` mentions `b` only as a label.
+    if (key === "property" && record.type === "MemberExpression") continue;
+    if (
+      key === "key" &&
+      record.computed !== true &&
+      (record.type === "Property" ||
+        record.type === "PropertyDefinition" ||
+        record.type === "MethodDefinition")
+    ) {
+      continue;
+    }
+    // Binding positions declare names rather than using them.
+    if (key === "id" && /(Declaration|Declarator)$/.test(record.type ?? "")) continue;
+    if (key === "params" && /Function/.test(record.type ?? "")) continue;
+
+    if (Array.isArray(value)) {
+      if (value.some((child) => referencesNames(child, names))) return true;
+    } else if (value !== null && typeof value === "object" && referencesNames(value, names)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /** Whether a node is a function or arrow function, which can carry a name. */
@@ -805,6 +902,10 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
       "    there next call. Refine one by defining it again — redefinition is fine.",
       "  - A declaration that awaits is call-local work, not a definition: put async",
       "    work in a statement and define from the result.",
+      "  - A declaration that DEPENDS on something you computed in this call is also",
+      "    call-local, not a saved tool: it is per-call data.",
+      "  - So is a declaration whose own initializer CALLS something: it computes a",
+      "    value now. A tool is a function, a class, or a literal.",
       "",
       "## What the project offers",
       "",
@@ -839,10 +940,42 @@ export function createHarness(capabilities: Capability[], options: HarnessOption
       return `Syntax error: ${(error as Error).message}\n\nNothing ran.`;
     }
 
+    // Classify with a FIXPOINT, because a definition can depend on a value that
+    // an earlier statement computed in this same call:
+    //
+    //   const d = await open('x')      work    — d is call-local
+    //   const n = d.lines.length       work    — it depends on d
+    //
+    // Such a statement is not a tool, it is per-call data, so it runs with the
+    // work. Persisting it would also be impossible: the top-level run happens
+    // before the work, so `d` would not exist yet.
+    const callLocal = new Set<string>();
+    const kinds = new Map<acorn.Node, "definition" | "work">();
+    for (let pass = 0; pass <= ast.body.length; pass += 1) {
+      let changed = false;
+      for (const statement of ast.body) {
+        const kind: "definition" | "work" =
+          isDefinition(statement) && !referencesNames(statement, callLocal) ? "definition" : "work";
+        if (kinds.get(statement) !== kind) {
+          kinds.set(statement, kind);
+          changed = true;
+        }
+        if (kind === "work") {
+          for (const name of boundNames(statement)) {
+            if (!callLocal.has(name)) {
+              callLocal.add(name);
+              changed = true;
+            }
+          }
+        }
+      }
+      if (!changed) break;
+    }
+
     const definitions: Definition[] = [];
     const work: acorn.Node[] = [];
     for (const statement of ast.body) {
-      if (!isDefinition(statement)) {
+      if (kinds.get(statement) === "work") {
         work.push(statement);
         continue;
       }

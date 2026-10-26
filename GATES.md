@@ -73,6 +73,16 @@ from inside that namespace rather than advertised as verbs.
   CHECK: node tools/checks/check.mjs source-in-process
   EXPECT: gate-passed:source-in-process
 
+## A definition that depends on this call stays in this call
+
+- [x] G17: A declaration whose initializer COMPUTES something is per-call data, not a saved tool — `const before = stats().peakMB` is not persisted, while a function, a class, a literal, and a helper whose body calls are
+  CHECK: node tools/checks/check.mjs call-local-dependency
+  EXPECT: gate-passed:call-local-dependency
+
+- [x] G16: A pipeline runs in source order — a value derived from per-call data is per-call data, not a saved tool — while a helper that depends on nothing is still saved with its description, and a helper whose body reads per-call data is treated as per-call data too
+  CHECK: node tools/checks/check.mjs call-local-dependency
+  EXPECT: gate-passed:call-local-dependency
+
 ## Persistence on disk
 
 - [x] G8: A definition made in one process is reloaded and usable in a **fresh process** on the same directory; `forget` removes it live and on disk, and it stays gone after a restart
@@ -131,3 +141,5 @@ from inside that namespace rather than advertised as verbs.
 | G15 | read the whole file instead of streaming a range | `a ranged read of a 100 MB dump grew the harness by 206 MB` |
 | G15 | swallow the search cap | `a capped search was silent: 3: Source Tree:` |
 | G15 | report no source for a skill that has one | `sourceSize reported nothing useful: null` |
+| G16 | classify definitions without checking what they depend on | `a pipeline did not run in source order: While defining: rows is not defined` |
+| G17 | save a declaration whose initializer calls something | `a computed value was persisted as a tool: after.js, before.js, doubleAll.js` |
