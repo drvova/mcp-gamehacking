@@ -632,6 +632,42 @@ const gates = {
         await run(session, "const fetchTop = async (q) => await q;");
         assert(readdirSync(dir).includes("fetchTop.js"), "a helper whose body calls was not saved");
 
+        // SHADOWING decides this correctly in both directions. A parameter, or a
+        // local declared at the top of the body, shadows the outer name, so the
+        // helper is a tool; a default value or a nested block does not, so it is
+        // not. Getting the first direction wrong discards a usable helper, which
+        // is silent — the tool is simply absent next call.
+        const shadowCases = [
+          {
+            name: "shadowParam",
+            code: "const sd = await Promise.resolve(1);\nconst shadowParam = (sd) => sd;",
+            saves: true,
+          },
+          {
+            name: "shadowLocal",
+            code: "const sk = await Promise.resolve(1);\nconst shadowLocal = () => { const sk = 2; return sk; };",
+            saves: true,
+          },
+          {
+            name: "defaultReads",
+            code: "const dv = await Promise.resolve(1);\nconst defaultReads = (x = dv) => x;",
+            saves: false,
+          },
+          {
+            name: "blockReads",
+            code: "const bq = await Promise.resolve(1);\nconst blockReads = () => { { const bq = 2; } return bq; };",
+            saves: false,
+          },
+        ];
+        for (const shadowCase of shadowCases) {
+          await run(session, shadowCase.code);
+          const present = readdirSync(dir).includes(`${shadowCase.name}.js`);
+          assert(
+            present === shadowCase.saves,
+            `${shadowCase.name} was ${present ? "saved" : "skipped"} but should be ${shadowCase.saves ? "saved" : "skipped"}`,
+          );
+        }
+
         // A helper whose BODY reads per-call data is per-call data too, because
         // saving it would persist a tool that breaks on the next call.
         await run(

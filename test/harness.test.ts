@@ -357,6 +357,40 @@ describe("a definition that depends on this call stays in this call", () => {
     expect(readdirSync(harnessDir)).toContain("fetchTop.js");
   });
 
+  it("keeps a helper whose parameter shadows the call-local name", async () => {
+    // `(d) => d` binds its own `d`; it does not read the call's. Skipping it
+    // would be the quieter failure: nothing breaks, the tool is simply gone.
+    await run("const d = await Promise.resolve(1);\nconst takesD = (d) => d;");
+
+    expect(readdirSync(harnessDir)).toContain("takesD.js");
+  });
+
+  it("keeps a helper whose body declares a local of that name", async () => {
+    await run(
+      "const k = await Promise.resolve(1);\nconst usesLocal = () => { const k = 2; return k; };",
+    );
+
+    expect(readdirSync(harnessDir)).toContain("usesLocal.js");
+  });
+
+  it("still treats a default value as a dependency", async () => {
+    // `(x = outer) => x` reads `outer` when called, so it does depend on this
+    // call even though `x` is bound.
+    await run("const outer = await Promise.resolve(1);\nconst defs = (x = outer) => x;");
+
+    expect(readdirSync(harnessDir)).not.toContain("defs.js");
+  });
+
+  it("does not treat a declaration in a nested block as shadowing the body", async () => {
+    // The inner `{ const q = 2 }` only shadows inside that block, so `return q`
+    // still reads the call's value.
+    await run(
+      "const q = await Promise.resolve(1);\nconst readsOuter = () => { { const q = 2; } return q; };",
+    );
+
+    expect(readdirSync(harnessDir)).not.toContain("readsOuter.js");
+  });
+
   it("uses a saved tool and per-call data together", async () => {
     await run("/** Sum a list. */\nconst sum = (list) => list.reduce((a, b) => a + b, 0);");
     const output = await run(

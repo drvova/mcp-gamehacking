@@ -75,6 +75,10 @@ from inside that namespace rather than advertised as verbs.
 
 ## A definition that depends on this call stays in this call
 
+- [x] G18: Shadowing is decided in BOTH directions — a parameter, a destructured/rest parameter, or a local declared at the top of the body shadows the call-local name (so the helper IS saved), while a default value, a nested arrow body, or a declaration inside a nested block does not (so it is NOT)
+  CHECK: node tools/checks/check.mjs call-local-dependency
+  EXPECT: gate-passed:call-local-dependency
+
 - [x] G17: A declaration whose initializer COMPUTES something is per-call data, not a saved tool — `const before = stats().peakMB` is not persisted, while a function, a class, a literal, and a helper whose body calls are
   CHECK: node tools/checks/check.mjs call-local-dependency
   EXPECT: gate-passed:call-local-dependency
@@ -143,3 +147,6 @@ from inside that namespace rather than advertised as verbs.
 | G15 | report no source for a skill that has one | `sourceSize reported nothing useful: null` |
 | G16 | classify definitions without checking what they depend on | `a pipeline did not run in source order: While defining: rows is not defined` |
 | G17 | save a declaration whose initializer calls something | `a computed value was persisted as a tool: after.js, before.js, doubleAll.js` |
+| G18 | ignore parameter shadowing | `shadowParam was skipped but should be saved` |
+| G18 | treat a default value as a binding rather than a use | `defaultReads was saved but should be skipped` |
+| G18 | treat a nested-block declaration as shadowing the body | `blockReads was saved but should be skipped` |

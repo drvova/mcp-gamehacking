@@ -390,19 +390,84 @@ function boundNames(node: Statement): string[] {
 }
 
 /**
- * Whether a node mentions any of these names, INCLUDING inside function bodies.
+ * Whether a node mentions any of these names as a FREE variable.
  *
  * Unlike the await check, descent does not stop at a function boundary: a helper
  * whose body reads a value computed in this call still depends on that call, so
- * it is call-local too.
+ * it is call-local too. But a name BOUND inside the function — a parameter, a
+ * local, a nested function's own name — shadows the outer one, so it is not a
+ * reference to it:
+ *
+ *     const d = await open('x')        // call-local
+ *     const f = (d) => d.n             // `d` is the parameter — a tool
+ *     const g = () => d.n              // closes over d   — not a tool
+ *
+ * Treating the first case as a dependency discarded a usable helper, which is
+ * the quieter of the two failures: nothing breaks, the tool simply is not there
+ * on the next call.
  */
-function referencesNames(node: unknown, names: Set<string>): boolean {
+function referencesNames(
+  node: unknown,
+  names: Set<string>,
+  shadowed: Set<string> = new Set(),
+): boolean {
   if (names.size === 0) return false;
   if (node === null || typeof node !== "object") return false;
   const record = node as Record<string, unknown> & { type?: string; computed?: boolean };
 
   if (record.type === "Identifier") {
-    return typeof record.name === "string" && names.has(record.name);
+    const name = record.name;
+    return typeof name === "string" && names.has(name) && !shadowed.has(name);
+  }
+
+  // A function binds its parameters, its own name, and its own declarations;
+  // all of those shadow the outer scope inside its body.
+  let inner = shadowed;
+  if (
+    record.type === "FunctionDeclaration" ||
+    record.type === "FunctionExpression" ||
+    record.type === "ArrowFunctionExpression"
+  ) {
+    inner = new Set(shadowed);
+    const own = declaredName(record);
+    if (own !== undefined) inner.add(own);
+
+    const params = record.params;
+    if (Array.isArray(params)) {
+      for (const param of params) {
+        for (const name of patternNames(param)) inner.add(name);
+      }
+      // A DEFAULT VALUE is a use, not a binding: `(x = outer) => x` reads
+      // `outer` when called, so it depends on this call. Params are therefore
+      // walked for their defaults with the bindings already shadowed, instead of
+      // being skipped as a whole.
+      for (const param of params) {
+        if (param === null || typeof param !== "object") continue;
+        const defaults =
+          (param as Record<string, unknown>).type === "AssignmentPattern"
+            ? [(param as Record<string, unknown>).right]
+            : [];
+        if (defaults.some((value) => referencesNames(value, names, inner))) return true;
+      }
+    }
+
+    // Declarations at the top of the body shadow too: `() => { const k = 1; ... }`
+    // does not read an outer `k`. Only the direct body is scanned, because a
+    // declaration inside a NESTED block does not shadow the whole body, and
+    // treating it as if it did would save a helper that really does depend on
+    // this call.
+    const body = record.body;
+    const bodyStatements =
+      body !== null &&
+      typeof body === "object" &&
+      (body as Record<string, unknown>).type === "BlockStatement"
+        ? ((body as Record<string, unknown>).body as unknown[])
+        : [];
+    if (Array.isArray(bodyStatements)) {
+      for (const statement of bodyStatements) {
+        for (const name of boundNames(statement as Statement)) inner.add(name);
+      }
+    }
   }
 
   for (const [key, value] of Object.entries(record)) {
@@ -423,12 +488,45 @@ function referencesNames(node: unknown, names: Set<string>): boolean {
     if (key === "params" && /Function/.test(record.type ?? "")) continue;
 
     if (Array.isArray(value)) {
-      if (value.some((child) => referencesNames(child, names))) return true;
-    } else if (value !== null && typeof value === "object" && referencesNames(value, names)) {
+      if (value.some((child) => referencesNames(child, names, inner))) return true;
+    } else if (
+      value !== null &&
+      typeof value === "object" &&
+      referencesNames(value, names, inner)
+    ) {
       return true;
     }
   }
   return false;
+}
+
+/** Every name a binding pattern binds, including destructuring and defaults. */
+function patternNames(node: unknown): string[] {
+  if (node === null || typeof node !== "object") return [];
+  const record = node as Record<string, unknown> & { type?: string };
+  if (record.type === "Identifier") {
+    return typeof record.name === "string" ? [record.name] : [];
+  }
+  if (record.type === "AssignmentPattern") {
+    return patternNames(record.left);
+  }
+  if (record.type === "RestElement") {
+    return patternNames(record.argument);
+  }
+  if (record.type === "ArrayPattern") {
+    const elements = Array.isArray(record.elements) ? record.elements : [];
+    return elements.flatMap((element) => patternNames(element));
+  }
+  if (record.type === "ObjectPattern") {
+    const properties = Array.isArray(record.properties) ? record.properties : [];
+    return properties.flatMap((property) => {
+      if (property === null || typeof property !== "object") return [];
+      const prop = property as Record<string, unknown>;
+      if (prop.type === "RestElement") return patternNames(prop.argument);
+      return patternNames(prop.value);
+    });
+  }
+  return [];
 }
 
 /** Whether a node is a function or arrow function, which can carry a name. */
